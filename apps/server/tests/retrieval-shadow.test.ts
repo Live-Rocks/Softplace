@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 import type { Message } from "@softplace/shared";
-import { RETRIEVAL_SHADOW, buildShadowDialogueWindow, buildShadowQuery, buildShadowQueryParts, truncate } from "../src/domain/retrievalShadow.js";
+import { RETRIEVAL_SHADOW, buildShadowDialogueWindow, buildShadowQuery, buildShadowQueryParts, buildShadowUserEvidence, truncate } from "../src/domain/retrievalShadow.js";
 import { processRetrievalShadowJobs, shadowErrorCode, type RetrievalShadowStore } from "../src/integrations/retrievalShadow.js";
 import { qualityAtThreshold } from "../src/scripts/retrievalShadowReport.js";
 import { candidatesToReview, formatCandidateHeader, formatReviewHeader, scanReviewRuns } from "../src/scripts/retrievalShadowReview.js";
@@ -27,6 +27,11 @@ test("shadow builders preserve Phase 0 roles, recent user context, and determini
     endSequence: 5,
     text: "使用者：我今天看到信又緊張了\n安放：你像是先預期又會被推翻\n使用者：果然又來了"
   });
+  assert.deepEqual(buildShadowUserEvidence(messages, "u3"), {
+    startSequence: 3,
+    endSequence: 5,
+    text: "我今天看到信又緊張了\n果然又來了"
+  });
   assert.equal(truncate("甲乙丙", 2), "甲乙");
   assert.equal(buildShadowQuery(messages, "u3"), buildShadowQuery(messages, "u3"));
 });
@@ -35,6 +40,7 @@ test("shadow builders reject image or crisis query and skip unsafe windows", () 
   const unsafe = messages.map((item) => item.id === "u3" ? { ...item, crisisDetected: true } : item);
   assert.throws(() => buildShadowQuery(unsafe, "u3"), /shadow_query_ineligible/);
   assert.equal(buildShadowDialogueWindow(unsafe, "u3"), null);
+  assert.equal(buildShadowUserEvidence(unsafe, "u3"), null);
 });
 
 test("review displays the exact embedding input, two context slots, and threshold state", () => {
@@ -124,14 +130,19 @@ test("review pagination handles exhaustion and resumes only unlabeled candidates
   assert.deepEqual(candidatesToReview([{ id: 1, review_label: "irrelevant" }]), []);
 });
 
-test("worker embeds query and window at 512-compatible shape, searches before saving current chunk, and stores no text", async () => {
+test("worker embeds query, dialogue, and user-only evidence, searches before saving current chunk, and stores no text", async () => {
   const order: string[] = [];
   const completed: any[] = [];
   const store: RetrievalShadowStore = {
     async claimJobs() { return [{ id: "job", userId: "user", conversationId: "conversation", queryMessageId: "u3", attempts: 1, createdAt: "2026-08-13T00:00:00.000Z" }]; },
     async getMessages() { return messages; },
     async match(_job, beforeSequence, embedding) { order.push("match"); assert.equal(beforeSequence, 1); assert.deepEqual(embedding, [1, 0]); return [{ chunkId: "chunk-old", score: 0.7 }]; },
-    async upsertChunk(_job, start, end, embedding) { order.push("upsert"); assert.deepEqual([start, end], [3, 5]); assert.deepEqual(embedding, [0, 1]); },
+    async upsertChunk(_job, start, end, dialogueEmbedding, evidenceEmbedding) {
+      order.push("upsert");
+      assert.deepEqual([start, end], [3, 5]);
+      assert.deepEqual(dialogueEmbedding, [0, 1]);
+      assert.deepEqual(evidenceEmbedding, [1, 1]);
+    },
     async complete(_job, _token, queueDelay, latency, candidates) { order.push("complete"); completed.push({ queueDelay, latency, candidates }); },
     async retry() { throw new Error("unexpected retry"); },
     async cleanup() { order.push("cleanup"); }
@@ -140,11 +151,15 @@ test("worker embeds query and window at 512-compatible shape, searches before sa
   let clock = Date.parse("2026-08-13T00:00:01.000Z");
   const result = await processRetrievalShadowJobs({
     store,
-    provider: { async embed(texts) { embeddedTexts = texts; return [[1, 0], [0, 1]]; } },
+    provider: { async embed(texts) { embeddedTexts = texts; return [[1, 0], [0, 1], [1, 1]]; } },
     now: () => { const value = clock; clock += 7; return value; }
   });
   assert.deepEqual(result, { claimed: 1, completed: 1, failed: 0 });
-  assert.equal(embeddedTexts.length, 2);
+  assert.deepEqual(embeddedTexts, [
+    "最近訊息：主管昨天又改了企劃\n最近訊息：我今天看到信又緊張了\n目前訊息：果然又來了",
+    "使用者：我今天看到信又緊張了\n安放：你像是先預期又會被推翻\n使用者：果然又來了",
+    "我今天看到信又緊張了\n果然又來了"
+  ]);
   assert.deepEqual(order, ["match", "upsert", "complete", "cleanup"]);
   assert.equal(JSON.stringify(completed).includes("果然又來了"), false);
 });

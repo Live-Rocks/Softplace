@@ -51,7 +51,8 @@
 - **使用者實測完成**：Retrieval Phase 1.5 已部署並完成 smoke test；新版 run 成功完成且無錯誤，5 個候選皆早於最早 recent user context 的搜尋上界，確認不再召回與 query context 重疊的 chunks。Review 顯示完整 query context 並採真正分頁；既有 53／25 v1 基線不重算，修正只影響部署後的新 runs，結果仍不進 prompt。
 - **使用者實測中**：Retrieval Phase 2 已部署至單一 allowlist。最近 10 則與 012 schema 正常；首個真實精確事實案例的正解「飽飽」存在於索引與 Top 5，但只排 Rank 4／5，舊 `0.60`／Top 2 策略安全 abstain，揭露真實排序不足。
 - **已部署、使用者實測中**：Retrieval Phase 2.1 與 migration `013` 已上線。首筆成功 `top5_all` run 注入 5／5 candidates、retrieval 使用 172 tokens／823 ms，並正確回答貓咪名字「飽飽」；另有一筆在 2,003 ms 觸發 `generation_retrieval_timeout` 並安全 fallback。已完成 1／25 個 runs 的人工檢閱，尚不足以宣稱 Phase 2.1 通過。
-- **程式已完成、待部署實測**：Retrieval Phase 2.2 將同步上限改為 2.5 秒，Generation 專用搜尋擴至 Top 20，再以本機 evidence 規則排除純記憶探問、低資訊與重複 user 內容，最多注入 5 個合格候選。策略獨立記為 `top20_local_rerank`；migration `014`、review/report 與固定「飽飽／中國武漢」測試已加入，但 production migration 與 smoke test 尚未執行。
+- **使用者實測未通過**：Retrieval Phase 2.2 與 migration `014` 已部署。三筆固定測試中，「我在哪裡哭過」在 1,376 ms 正確；「貓咪名字」雖在 506 ms 完成，但正確 user 證據位於 Rank 19、前五名被較弱內容占滿；「第一次出國」在 embedding 階段達 2,500 ms timeout。此結果仍是有效失敗基線，不因清空測試聊天而重算。
+- **程式已完成、待部署實測**：Retrieval Phase 2.3 讓每個 logical chunk 同時保存 dialogue 與 user-only evidence embeddings；Generation 改查 user-only evidence Top 20，使排序依據和實際注入文字一致，再保留 Phase 2.2 的探問、低資訊、重複與安全過濾。Migration `015`、既有 chunk evidence 回填、Shadow 新 chunk 雙向量寫入、`user_evidence_top20` review/report 隔離與回歸測試已加入。
 
 ### Ava beta
 
@@ -77,15 +78,16 @@
 
 ## 近期優先順序
 
-1. 依 runbook 關閉 Generation、部署 Phase 2.2、套用 migration `014` 後再開啟，完成「飽飽／中國武漢」兩個固定 smoke cases。
-2. 累積並檢閱 10 個 `top20_local_rerank` injected runs，確認 helpful、錯誤召回、selection decisions 與 timeout rate；舊 `top5_all` 基線不混算。
-3. 長時間實測 Ava 延遲回覆、主動訊息、未讀與跨日生活脈絡。
-4. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。
-5. 在少量封測前補齊監控、錯誤可讀性、資料刪除與隱私說明。
+1. 保持 Generation 關閉，套用 migration `015`，先 dry-run 再為單一 allowlist UUID 回填 user-only evidence embeddings；確認缺漏為 0 後部署／開啟 Generation。
+2. 以原有未清空資料重測「飽飽／中國武漢／在哪裡哭過」，確認新 run 為 `user_evidence_top20`；若清空後另做乾淨資料測試，必須和原污染資料結果分開解讀。
+3. 累積並檢閱 10 個 `user_evidence_top20` injected runs，確認 helpful、錯誤召回與 timeout rate；所有舊策略基線不混算。
+4. 長時間實測 Ava 延遲回覆、主動訊息、未讀與跨日生活脈絡。
+5. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。
+6. 在少量封測前補齊監控、錯誤可讀性、資料刪除與隱私說明。
 
 ## 延後項目
 
-Retrieval Phase 0、Phase 1 Shadow 與 Phase 1.5 已完成；Phase 2／2.1 僅供單一知情 Deep allowlist Canary，尚未擴大為 production RAG。
+Retrieval Phase 0、Phase 1 Shadow 與 Phase 1.5 已完成；Phase 2～2.3 僅供單一知情 Deep allowlist Canary，尚未擴大為 production RAG。
 
 - 正式付款、訂閱與方案升降級。
 - Google／Apple 等第三方登入。

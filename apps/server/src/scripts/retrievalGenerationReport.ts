@@ -7,7 +7,7 @@ import { supabaseAdmin } from "../integrations/supabase.js";
 type Run = {
   id: string;
   status: "injected" | "abstained" | "fallback";
-  selection_strategy: "threshold_top2" | "top5_all" | "top20_local_rerank";
+  selection_strategy: "threshold_top2" | "top5_all" | "top20_local_rerank" | "user_evidence_top20";
   injected_count: number;
   embedding_latency_ms: number;
   search_latency_ms: number;
@@ -47,9 +47,9 @@ export async function main() {
   ]);
   console.info("[retrieval-generation:report]", {
     directory,
-    injectedRuns: report.top20LocalRerankRuns.injected,
-    reviewedInjectedRuns: report.phase22.review.reviewedInjectedRuns,
-    phase22MetricsPass: report.phase22.metricsPass
+    injectedRuns: report.userEvidenceTop20Runs.injected,
+    reviewedInjectedRuns: report.phase23.review.reviewedInjectedRuns,
+    phase23MetricsPass: report.phase23.metricsPass
   });
   return { directory, report };
 }
@@ -59,28 +59,33 @@ export function buildGenerationReport(runs: Run[], candidates: Candidate[]) {
   for (const candidate of candidates) byRun.set(candidate.run_id, [...(byRun.get(candidate.run_id) ?? []), candidate]);
   const top5Runs = runs.filter((run) => run.selection_strategy === "top5_all");
   const top20Runs = runs.filter((run) => run.selection_strategy === "top20_local_rerank");
+  const evidenceRuns = runs.filter((run) => run.selection_strategy === "user_evidence_top20");
   const phase21Review = buildReview(top5Runs, byRun, 25, false);
   const phase22Review = buildReview(top20Runs, byRun, 10, true);
   const phase21Pass = passesQualityGate(phase21Review);
   const timeoutCount = top20Runs.filter((run) => run.error_code?.endsWith("_timeout")).length;
   const timeoutRate = ratio(timeoutCount, top20Runs.length);
   const phase22MetricsPass = passesQualityGate(phase22Review) && timeoutRate <= 0.1;
+  const phase23Review = buildReview(evidenceRuns, byRun, 10, true);
+  const evidenceTimeoutCount = evidenceRuns.filter((run) => run.error_code?.endsWith("_timeout")).length;
+  const evidenceTimeoutRate = ratio(evidenceTimeoutCount, evidenceRuns.length);
+  const phase23MetricsPass = passesQualityGate(phase23Review) && evidenceTimeoutRate <= 0.1;
   const top20RunIds = new Set(top20Runs.map((run) => run.id));
-  const decisionCounts = Object.fromEntries([
-    "selected", "recall_probe_only", "boilerplate_only", "duplicate", "not_selected", "invalid_source"
-  ].map((decision) => [decision, candidates.filter((candidate) =>
-    top20RunIds.has(candidate.run_id) && candidate.selection_decision === decision
-  ).length]));
+  const evidenceRunIds = new Set(evidenceRuns.map((run) => run.id));
+  const decisionCounts = selectionDecisionCounts(candidates, top20RunIds);
+  const evidenceDecisionCounts = selectionDecisionCounts(candidates, evidenceRunIds);
   return {
     generatedAt: new Date().toISOString(),
     privacy: "No chat content is included.",
     strategies: {
       thresholdTop2: summarizeStatuses(runs.filter((run) => run.selection_strategy === "threshold_top2")),
       top5All: summarizeStatuses(top5Runs),
-      top20LocalRerank: summarizeStatuses(top20Runs)
+      top20LocalRerank: summarizeStatuses(top20Runs),
+      userEvidenceTop20: summarizeStatuses(evidenceRuns)
     },
     top5AllRuns: summarizeStatuses(top5Runs),
     top20LocalRerankRuns: summarizeStatuses(top20Runs),
+    userEvidenceTop20Runs: summarizeStatuses(evidenceRuns),
     errors: errorsFor(top5Runs),
     review: phase21Review,
     latencyMs: latencyFor(top5Runs),
@@ -101,6 +106,21 @@ export function buildGenerationReport(runs: Run[], candidates: Candidate[]) {
         fixedSmokeCases: "manual"
       },
       metricsPass: phase22MetricsPass
+    },
+    phase23: {
+      errors: errorsFor(evidenceRuns),
+      timeoutCount: evidenceTimeoutCount,
+      timeoutRate: evidenceTimeoutRate,
+      selectionDecisions: evidenceDecisionCounts,
+      review: phase23Review,
+      latencyMs: latencyFor(evidenceRuns),
+      tokens: tokensFor(evidenceRuns),
+      completionCriteria: {
+        ...completionCriteria(phase23Review),
+        timeoutAtMost10Percent: evidenceRuns.length > 0 && evidenceTimeoutRate <= 0.1,
+        fixedSmokeCases: "manual"
+      },
+      metricsPass: phase23MetricsPass
     }
   };
 }
@@ -205,6 +225,14 @@ function summarizeStatuses(runs: Run[]) {
   ])) as Record<"injected" | "abstained" | "fallback", number>;
 }
 
+function selectionDecisionCounts(candidates: Candidate[], runIds: Set<string>) {
+  return Object.fromEntries([
+    "selected", "recall_probe_only", "boilerplate_only", "duplicate", "not_selected", "invalid_source"
+  ].map((decision) => [decision, candidates.filter((candidate) =>
+    runIds.has(candidate.run_id) && candidate.selection_decision === decision
+  ).length]));
+}
+
 function percentile(values: number[], quantile: number) {
   if (!values.length) return 0;
   const sorted = [...values].sort((left, right) => left - right);
@@ -223,6 +251,15 @@ function markdown(report: ReturnType<typeof buildGenerationReport>) {
     "",
     "> No chat content is included.",
     "",
+    `User evidence Top 20 injected / abstained / fallback: ${report.userEvidenceTop20Runs.injected} / ${report.userEvidenceTop20Runs.abstained} / ${report.userEvidenceTop20Runs.fallback}`,
+    `User evidence timeout rate: ${(report.phase23.timeoutRate * 100).toFixed(1)}%`,
+    `User evidence reviewed injected runs: ${report.phase23.review.reviewedInjectedRuns} / ${report.phase23.review.targetInjectedRuns}`,
+    `User evidence helpful / neutral / harmful: ${report.phase23.review.helpful} / ${report.phase23.review.neutral} / ${report.phase23.review.harmful}`,
+    `User evidence selection decisions: ${JSON.stringify(report.phase23.selectionDecisions)}`,
+    `User evidence retrieval latency P50 / P95: ${report.phase23.latencyMs.retrievalP50} / ${report.phase23.latencyMs.retrievalP95} ms`,
+    `User evidence metrics pass (fixed smoke cases are manual): ${report.phase23.metricsPass ? "YES" : "NO"}`,
+    "",
+    "Historical Phase 2.2:",
     `Top 20 local rerank injected / abstained / fallback: ${report.top20LocalRerankRuns.injected} / ${report.top20LocalRerankRuns.abstained} / ${report.top20LocalRerankRuns.fallback}`,
     `Top 20 timeout rate: ${(report.phase22.timeoutRate * 100).toFixed(1)}%`,
     `Top 20 reviewed injected runs: ${report.phase22.review.reviewedInjectedRuns} / ${report.phase22.review.targetInjectedRuns}`,

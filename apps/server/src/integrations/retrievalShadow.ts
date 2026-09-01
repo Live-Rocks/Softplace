@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import type { Message } from "@softplace/shared";
 import { config } from "../config.js";
-import { RETRIEVAL_SHADOW, buildShadowDialogueWindow, buildShadowQueryParts } from "../domain/retrievalShadow.js";
+import { RETRIEVAL_SHADOW, buildShadowDialogueWindow, buildShadowQueryParts, buildShadowUserEvidence } from "../domain/retrievalShadow.js";
 import { supabaseAdmin } from "./supabase.js";
 
 export type RetrievalShadowJob = {
@@ -22,7 +22,7 @@ export type RetrievalShadowStore = {
   match(job: RetrievalShadowJob, beforeSequence: number, embedding: number[]): Promise<RetrievalShadowCandidate[]>;
   complete(job: RetrievalShadowJob, token: string, queueDelayMs: number, searchLatencyMs: number, candidates: RetrievalShadowCandidate[]): Promise<void>;
   retry(jobId: string, token: string, errorCode: string): Promise<void>;
-  upsertChunk(job: RetrievalShadowJob, startSequence: number, endSequence: number, embedding: number[]): Promise<void>;
+  upsertChunk(job: RetrievalShadowJob, startSequence: number, endSequence: number, dialogueEmbedding: number[], evidenceEmbedding: number[]): Promise<void>;
   cleanup(): Promise<void>;
 };
 
@@ -111,11 +111,12 @@ export function createSupabaseShadowStore(): RetrievalShadowStore | null {
       });
       if (error) throw new Error("shadow_retry_failed");
     },
-    async upsertChunk(job, startSequence, endSequence, embedding) {
-      const { error } = await db.rpc("upsert_retrieval_chunk", {
+    async upsertChunk(job, startSequence, endSequence, dialogueEmbedding, evidenceEmbedding) {
+      const { error } = await db.rpc("upsert_retrieval_chunk_with_evidence", {
         p_user_id: job.userId, p_conversation_id: job.conversationId,
         p_anchor_message_id: job.queryMessageId, p_start_sequence: startSequence,
-        p_end_sequence: endSequence, p_embedding: vector(embedding)
+        p_end_sequence: endSequence, p_dialogue_embedding: vector(dialogueEmbedding),
+        p_evidence_embedding: vector(evidenceEmbedding)
       });
       if (error) throw new Error("shadow_chunk_failed");
     },
@@ -143,14 +144,15 @@ export async function processRetrievalShadowJobs(input: {
       const messages = await input.store.getMessages(job);
       const query = buildShadowQueryParts(messages, job.queryMessageId);
       const window = buildShadowDialogueWindow(messages, job.queryMessageId);
-      const texts = window ? [query.text, window.text] : [query.text];
-      const [queryEmbedding, chunkEmbedding] = await input.provider.embed(texts);
+      const evidence = buildShadowUserEvidence(messages, job.queryMessageId);
+      const texts = window && evidence ? [query.text, window.text, evidence.text] : [query.text];
+      const [queryEmbedding, chunkEmbedding, evidenceEmbedding] = await input.provider.embed(texts);
       if (!queryEmbedding) throw new Error("shadow_embedding_invalid");
       const searchStarted = now();
       const candidates = await input.store.match(job, query.searchBeforeSequence, queryEmbedding);
       const searchLatencyMs = Math.max(0, now() - searchStarted);
-      if (window && chunkEmbedding) {
-        await input.store.upsertChunk(job, window.startSequence, window.endSequence, chunkEmbedding);
+      if (window && evidence && chunkEmbedding && evidenceEmbedding) {
+        await input.store.upsertChunk(job, window.startSequence, window.endSequence, chunkEmbedding, evidenceEmbedding);
       }
       await input.store.complete(job, token, Math.max(0, processingStarted - Date.parse(job.createdAt)), searchLatencyMs, candidates);
       completed += 1;

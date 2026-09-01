@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Message } from "@softplace/shared";
 import { config } from "../config.js";
-import { buildShadowDialogueWindow } from "../domain/retrievalShadow.js";
+import { buildShadowDialogueWindow, buildShadowUserEvidence } from "../domain/retrievalShadow.js";
 import { createShadowEmbeddingProvider } from "../integrations/retrievalShadow.js";
 import { supabaseAdmin } from "../integrations/supabase.js";
 
@@ -17,7 +17,14 @@ export async function main(argv = process.argv.slice(2)) {
   const { data: conversations, error: conversationError } = await supabaseAdmin.from("conversations")
     .select("id").eq("user_id", userId);
   if (conversationError) throw new Error("shadow_backfill_read_failed");
-  const windows: Array<{ conversationId: string; anchorId: string; start: number; end: number; text: string }> = [];
+  const windows: Array<{
+    conversationId: string;
+    anchorId: string;
+    start: number;
+    end: number;
+    dialogueText: string;
+    evidenceText: string;
+  }> = [];
   let skipped = 0;
   for (const conversation of conversations ?? []) {
     const { data, error } = await supabaseAdmin.from("messages")
@@ -27,8 +34,16 @@ export async function main(argv = process.argv.slice(2)) {
     const messages = (data ?? []).map(mapMessage);
     for (const message of messages.filter((item) => item.role === "user")) {
       const window = buildShadowDialogueWindow(messages, message.id);
-      if (!window) { skipped += 1; continue; }
-      windows.push({ conversationId: conversation.id, anchorId: message.id, start: window.startSequence, end: window.endSequence, text: window.text });
+      const evidence = buildShadowUserEvidence(messages, message.id);
+      if (!window || !evidence) { skipped += 1; continue; }
+      windows.push({
+        conversationId: conversation.id,
+        anchorId: message.id,
+        start: window.startSequence,
+        end: window.endSequence,
+        dialogueText: window.text,
+        evidenceText: evidence.text
+      });
     }
   }
 
@@ -38,13 +53,16 @@ export async function main(argv = process.argv.slice(2)) {
   let written = 0;
   for (let offset = 0; offset < windows.length; offset += 64) {
     const batch = windows.slice(offset, offset + 64);
-    const embeddings = await provider.embed(batch.map((window) => window.text));
+    const embeddings = await provider.embed(batch.flatMap((window) => [window.dialogueText, window.evidenceText]));
     for (let index = 0; index < batch.length; index += 1) {
       const window = batch[index]!;
-      const embedding = embeddings[index]!;
-      const { error } = await supabaseAdmin.rpc("upsert_retrieval_chunk", {
+      const dialogueEmbedding = embeddings[index * 2]!;
+      const evidenceEmbedding = embeddings[index * 2 + 1]!;
+      const { error } = await supabaseAdmin.rpc("upsert_retrieval_chunk_with_evidence", {
         p_user_id: userId, p_conversation_id: window.conversationId, p_anchor_message_id: window.anchorId,
-        p_start_sequence: window.start, p_end_sequence: window.end, p_embedding: `[${embedding.join(",")}]`
+        p_start_sequence: window.start, p_end_sequence: window.end,
+        p_dialogue_embedding: `[${dialogueEmbedding.join(",")}]`,
+        p_evidence_embedding: `[${evidenceEmbedding.join(",")}]`
       });
       if (error) throw new Error("shadow_backfill_write_failed");
       written += 1;
@@ -69,4 +87,3 @@ function mapMessage(row: any): Message {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => { console.error(`[retrieval-shadow:backfill] ${error instanceof Error ? error.message : "failed"}`); process.exitCode = 1; });
 }
-

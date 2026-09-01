@@ -32,10 +32,10 @@ test("generation query uses two recent eligible user messages and history cutoff
   assert.equal(generationSearchBeforeSequence([]), null);
 });
 
-test("generation constants use top twenty local rerank with a 2.5 second deadline", () => {
+test("generation constants use user-only evidence search with a 2.5 second deadline", () => {
   assert.equal(RETRIEVAL_GENERATION.candidateLimit, 20);
   assert.equal(RETRIEVAL_GENERATION.injectionLimit, 5);
-  assert.equal(RETRIEVAL_GENERATION.selectionStrategy, "top20_local_rerank");
+  assert.equal(RETRIEVAL_GENERATION.selectionStrategy, "user_evidence_top20");
   assert.equal(RETRIEVAL_GENERATION.timeoutMs, 2500);
 });
 
@@ -90,6 +90,13 @@ test("local evidence rerank removes exact user duplicates and never fills with f
     "selected", "duplicate", "duplicate", "invalid_source", "recall_probe_only"
   ]);
   assert.equal(reranked.filter((item) => item.selectionDecision === "selected").length, 1);
+});
+
+test("low-information filtering covers observed test and acknowledgement variants", () => {
+  assert.equal(classifyGenerationMessage("就測試😂"), "boilerplate");
+  assert.equal(classifyGenerationMessage("嘻嘻好棒"), "boilerplate");
+  assert.equal(classifyGenerationMessage("太好了，你記起來了"), "boilerplate");
+  assert.equal(classifyGenerationMessage("太好了，我幫牠取名叫飽飽"), "evidence");
 });
 
 test("local evidence rerank selects at most five and marks later qualified candidates", () => {
@@ -234,6 +241,36 @@ test("phase 2.2 report isolates local rerank, reviews only injected candidates, 
   assert.equal(buildGenerationReport([...injectedRuns, timeout, secondTimeout], candidates).phase22.metricsPass, false);
 });
 
+test("phase 2.3 report isolates user evidence search from the failed dialogue-ranked baseline", () => {
+  const evidenceRuns = Array.from({ length: 10 }, (_, index) => ({
+    id: `evidence-${index}`,
+    status: "injected" as const,
+    selection_strategy: "user_evidence_top20" as const,
+    injected_count: 2,
+    embedding_latency_ms: 300,
+    search_latency_ms: 100,
+    total_retrieval_latency_ms: 400,
+    history_10_tokens: 500,
+    history_20_tokens: 1200,
+    retrieval_tokens: 120,
+    actual_input_tokens: 1300,
+    output_tokens: 100,
+    response_effect: index < 5 ? "helpful" as const : "neutral" as const,
+    stale_detected: false,
+    sensitive_detected: false,
+    error_code: null
+  }));
+  const historical = { ...evidenceRuns[0]!, id: "old", selection_strategy: "top20_local_rerank" as const };
+  const candidates = evidenceRuns.map((run) => ({
+    run_id: run.id, injected: true, selection_decision: "selected", review_label: "must"
+  }));
+  const report = buildGenerationReport([...evidenceRuns, historical], candidates);
+  assert.equal(report.phase23.review.reviewedInjectedRuns, 10);
+  assert.equal(report.phase23.metricsPass, true);
+  assert.deepEqual(report.userEvidenceTop20Runs, { injected: 10, abstained: 0, fallback: 0 });
+  assert.deepEqual(report.top20LocalRerankRuns, { injected: 1, abstained: 0, fallback: 0 });
+});
+
 test("generation errors are redacted to fixed codes", () => {
   assert.equal(retrievalGenerationErrorCode(new Error("generation_search_failed")), "generation_search_failed");
   assert.equal(retrievalGenerationErrorCode(new Error("generation_embedding_failed")), "generation_embedding_failed");
@@ -280,10 +317,37 @@ test("top five recording, review, and reporting explicitly isolate the new strat
     fs.readFile(new URL("../src/scripts/retrievalGenerationReport.ts", import.meta.url), "utf8")
   ]);
   assert.match(integration, /p_selection_strategy: RETRIEVAL_GENERATION\.selectionStrategy/);
-  assert.match(review, /\.eq\("selection_strategy", "top20_local_rerank"\)/);
+  assert.match(integration, /rpc\("match_retrieval_generation_evidence_chunks"/);
+  assert.match(review, /\.eq\("selection_strategy", "user_evidence_top20"\)/);
   assert.match(report, /run\.selection_strategy === "top5_all"/);
   assert.match(report, /run\.selection_strategy === "threshold_top2"/);
   assert.match(report, /run\.selection_strategy === "top20_local_rerank"/);
+  assert.match(report, /run\.selection_strategy === "user_evidence_top20"/);
+});
+
+test("user evidence migration aligns generation search with injected user text and supports backfill", async () => {
+  const [sql, backfill, shadowBackfill] = await Promise.all([
+    fs.readFile(new URL("../../../supabase/migrations/015_retrieval_user_evidence.sql", import.meta.url), "utf8"),
+    fs.readFile(new URL("../src/scripts/retrievalEvidenceBackfill.ts", import.meta.url), "utf8"),
+    fs.readFile(new URL("../src/scripts/retrievalShadowBackfill.ts", import.meta.url), "utf8")
+  ]);
+  assert.match(sql, /add column evidence_embedding extensions\.vector\(512\)/);
+  assert.match(sql, /evidence_embedding extensions\.vector_cosine_ops/);
+  assert.match(sql, /match_retrieval_generation_evidence_chunks/);
+  assert.match(sql, /c\.evidence_embedding <=> p_query_embedding/);
+  assert.match(sql, /c\.evidence_embedding is not null/);
+  assert.match(sql, /c\.user_id = p_user_id/);
+  assert.match(sql, /c\.conversation_id = p_conversation_id/);
+  assert.match(sql, /c\.end_sequence < p_query_sequence/);
+  assert.match(sql, /upsert_retrieval_chunk_with_evidence/);
+  assert.match(sql, /set_retrieval_chunk_evidence_embedding/);
+  assert.match(sql, /selection_strategy = 'user_evidence_top20'/);
+  assert.match(sql, /search_strategy = 'user_only'/);
+  assert.match(sql, /to service_role/g);
+  assert.match(backfill, /\.is\("evidence_embedding", null\)/);
+  assert.match(backfill, /buildShadowUserEvidence/);
+  assert.doesNotMatch(backfill, /console\.info\([^\n]*\.text/);
+  assert.match(shadowBackfill, /upsert_retrieval_chunk_with_evidence/);
 });
 
 test("local rerank migration preserves old strategies and isolates the top twenty RPC", async () => {

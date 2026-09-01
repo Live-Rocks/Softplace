@@ -44,11 +44,9 @@ export function buildShadowQueryParts(messages: Message[], queryMessageId: strin
 }
 
 export function buildShadowDialogueWindow(messages: Message[], anchorMessageId: string) {
-  const anchor = messages.find((message) => message.id === anchorMessageId && message.role === "user");
-  if (!anchor || !isEligibleShadowMessage(anchor)) return null;
-  const first = messages.find((message) => message.sequence === anchor.sequence - 2 && message.role === "user");
-  const assistant = messages.find((message) => message.sequence === anchor.sequence - 1 && message.role === "assistant");
-  if (!first || !assistant || !isEligibleShadowMessage(first) || !isEligibleShadowMessage(assistant)) return null;
+  const source = shadowWindowSource(messages, anchorMessageId);
+  if (!source) return null;
+  const [first, assistant, anchor] = source;
   return {
     startSequence: first.sequence,
     endSequence: anchor.sequence,
@@ -58,6 +56,28 @@ export function buildShadowDialogueWindow(messages: Message[], anchorMessageId: 
       `使用者：${truncate(anchor.content, RETRIEVAL_SHADOW.maxChunkMessageCharacters)}`
     ].join("\n")
   };
+}
+
+export function buildShadowUserEvidence(messages: Message[], anchorMessageId: string) {
+  const source = shadowWindowSource(messages, anchorMessageId);
+  if (!source) return null;
+  const [first, , anchor] = source;
+  return {
+    startSequence: first.sequence,
+    endSequence: anchor.sequence,
+    text: [first, anchor]
+      .map((message) => truncate(message.content, RETRIEVAL_SHADOW.maxChunkMessageCharacters))
+      .join("\n")
+  };
+}
+
+function shadowWindowSource(messages: Message[], anchorMessageId: string): [Message, Message, Message] | null {
+  const anchor = messages.find((message) => message.id === anchorMessageId && message.role === "user");
+  if (!anchor || !isEligibleShadowMessage(anchor)) return null;
+  const first = messages.find((message) => message.sequence === anchor.sequence - 2 && message.role === "user");
+  const assistant = messages.find((message) => message.sequence === anchor.sequence - 1 && message.role === "assistant");
+  if (!first || !assistant || !isEligibleShadowMessage(first) || !isEligibleShadowMessage(assistant)) return null;
+  return [first, assistant, anchor];
 }
 
 export function truncate(value: string, maxCharacters: number) {

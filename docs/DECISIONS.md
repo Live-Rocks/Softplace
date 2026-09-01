@@ -130,3 +130,11 @@
 - 背景：`top5_all` 共 23 個 runs 中有 8 次逾時，最近 5 次皆在 2 秒觸發 fallback；非同步 Shadow 仍能找到「中國武漢」，但反覆的「記得貓咪名字嗎」測試 chunks 會擠掉真正包含「飽飽」的 user 原話。Dialogue embedding 可能受舊 assistant 回覆影響，實際注入卻只允許 user 原話。
 - 決定：同步上限提高至 2.5 秒；Generation 專用搜尋取 Top 20，再以不增加 API 呼叫的本機規則排除純記憶探問、固定低資訊與重複 user 內容，依原始向量 rank 注入最多 5 個合格候選。舊 assistant、圖片與危機內容仍不得注入。
 - 影響：預期提高事實 recall 並降低重複問句污染，但規則式分類仍可能漏掉特殊表達，因此以 `top20_local_rerank` 獨立觀測 10 個 reviewed injected runs；逾時率高於 10% 或出現任何 harmful／stale／sensitive／forbidden 時不得擴大 Canary。
+
+## ADR-017：Generation 改用 User-only Evidence Embedding
+
+- 日期：2026-09-01
+- 狀態：Accepted，待 Canary 實測
+- 背景：Phase 2.2 實測中，貓咪名字的正確 user 原話「飽飽」已被 Top 20 找到但位於 Rank 19；前方一個 chunk 主要因舊 assistant 回覆提及答案而取得較高 dialogue 相似度，實際注入卻只能送出不含答案的 user 原話。規則過濾能刪除探問與低資訊文字，但不能修正搜尋表示和注入證據不一致。
+- 決定：同一 logical chunk 額外保存只串接兩則安全 user 原話的 512 維 evidence embedding。Shadow 保留既有 dialogue 搜尋以延續基線；Generation 改以 evidence embedding 搜尋 Top 20，仍套用既有探問、低資訊、重複與安全過濾，最多注入五個 user-only 候選。不增加同步模型呼叫。
+- 影響：既有 chunks 必須受控回填 evidence embedding；未回填的 chunk 不參與新搜尋。新結果記為 `user_evidence_top20`，不得與失敗的 `top20_local_rerank` 基線混算。這能讓搜尋文字與注入文字一致，但仍需固定案例及人工檢閱驗證排序品質，不能只因清空測試對話後成功就宣稱污染問題已解決。

@@ -11,6 +11,7 @@
     "test": "tsx --test tests/*.test.ts",
     "eval:retrieval": "tsx src/evals/retrieval/runRetrievalEval.ts",
     "retrieval:shadow:backfill": "tsx src/scripts/retrievalShadowBackfill.ts",
+    "retrieval:evidence:backfill": "tsx src/scripts/retrievalEvidenceBackfill.ts",
     "retrieval:shadow:review": "tsx src/scripts/retrievalShadowReview.ts",
     "retrieval:shadow:report": "tsx src/scripts/retrievalShadowReport.ts",
     "retrieval:generation:review": "tsx src/scripts/retrievalGenerationReview.ts",

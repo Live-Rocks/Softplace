@@ -106,8 +106,10 @@ artifacts/retrieval-eval/reports/<timestamp>/report.md
 - 後續診斷顯示 `top5_all` 共 23 runs 有 8 次 timeout（34.8%），最近 5 次全數在 2 秒 fallback；相同訊息的 Shadow 搜尋仍正常完成，因此同步總上限先提高至 2.5 秒，並分開記錄 embedding／search／source timeout code。
 - 「第一次出國」正確的「中國武漢」仍位於 Shadow Rank 1 或 Rank 5；「貓咪名字」則被多個只有「記得名字嗎」而沒有 user 答案的測試 chunks 擠出 Top 5。這表示除了 timeout，還存在 dialogue embedding 與 user-only 注入內容不一致造成的候選污染。
 - 新策略 `top20_local_rerank` 不新增模型呼叫：先取 Top 20，再排除純記憶探問、固定低資訊、無效來源與重複 user 原話；保留原始向量順序並只注入最多 5 個合格候選，不足 5 個不補滿。
+- Phase 2.2 真實固定測試未通過：哭泣地點正確；貓咪正解雖在 Top 20，卻因 dialogue embedding 與 user-only 注入不一致落在 Rank 19 而未選；第一次出國則在 2.5 秒的 embedding 階段 timeout。這三筆保留為不可覆寫的失敗基線。
+- Phase 2.3 `user_evidence_top20` 為每個 logical chunk 增加 user-only evidence embedding，Generation 直接用它搜尋並注入同一批 user 原話；Shadow dialogue 基線不變。既有 chunks 需先回填，未有 evidence embedding 的資料不會進入新策略候選。
 - 每個候選保存原始 rank／score、selection rank 與固定 decision；Review 只要求標註實際 injected candidates，但會顯示完整候選池與排除原因。Report 與舊 `threshold_top2`／`top5_all` 完全分開。
-- Phase 2.2 需人工確認「飽飽／中國武漢」固定案例、完成 10 個 reviewed injected runs、helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0；程式完成不代表 Canary 已通過。
+- Phase 2.2 已因固定案例與 timeout gate 失敗；Phase 2.3 需重新人工確認「飽飽／中國武漢／哭泣地點」、完成 10 個 `user_evidence_top20` reviewed injected runs、helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0；程式完成不代表 Canary 已通過。
 
 ## 修改資料集
 

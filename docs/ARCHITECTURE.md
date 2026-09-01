@@ -150,9 +150,9 @@ Mobile 已安裝通知套件，登入後會取得並向 Server 註冊 Expo Push 
 
 Ava：`companion_definitions`、`ava_event_runs`、`companion_daily_states`、`user_companions`、`companion_messages`、`companion_memories`、`companion_jobs`、`companion_daily_usage`、`push_tokens`。
 
-Retrieval Shadow：`retrieval_chunks`、`retrieval_shadow_jobs`、`retrieval_shadow_runs`、`retrieval_shadow_candidates`。只允許 service-role；chunks 保存向量與 message ID，不重複保存聊天全文。每分鐘 worker 非同步搜尋，結果不進 prompt 或 Mobile API。
+Retrieval Shadow：`retrieval_chunks`、`retrieval_shadow_jobs`、`retrieval_shadow_runs`、`retrieval_shadow_candidates`。只允許 service-role；每個安全的 `user → assistant → user` logical chunk 同時保存 `dialogue_window` 與 user-only evidence 兩組向量及 message ID，不重複保存聊天全文。Shadow 沿用 dialogue 向量做離線觀測；每分鐘 worker 非同步搜尋，結果不進 prompt 或 Mobile API。
 
-Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前同步搜尋 Top 20，Phase 2.2 以本機規則排除純記憶探問、低資訊與重複內容，再將最多五個 user-only 證據交給同一次生成，整段最多 1,200 tokens。觀測資料以 `threshold_top2`／`top5_all`／`top20_local_rerank` 分版，只保存 ID、分數、選擇決策、延遲、token 與人工標籤，30 天後清除。
+Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前以 user-only evidence 向量同步搜尋 Top 20，再以本機規則排除純記憶探問、低資訊與重複內容，將最多五個同樣的 user-only 證據交給同一次生成，整段最多 1,200 tokens。這避免舊 assistant 文句影響排序卻不進 prompt 的表示落差。觀測資料以 `threshold_top2`／`top5_all`／`top20_local_rerank`／`user_evidence_top20` 分版，只保存 ID、分數、選擇決策、延遲、token 與人工標籤，30 天後清除。
 
 一般使用者可透過 RLS 讀取自己的核心資料；實際 App 寫入主要由 server 使用 service-role 完成。成本保護與 Ava 資料表不開放 anon／authenticated 直接存取，只允許 service-role 與受控 RPC。
 

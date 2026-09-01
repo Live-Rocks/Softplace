@@ -212,7 +212,33 @@ npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
 npm run retrieval:generation:report
 ```
 
-Review 預設只處理 `top20_local_rerank`，在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。完整 10 個 injected runs 後，helpful 至少 50%、策略期間 timeout 不高於 10%，且 harmful、stale、sensitive、injected forbidden 均為 0；貓咪與出國固定 smoke cases 仍須人工確認。Report 依 strategy 分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
+Phase 2.2 歷史檢閱以 `top20_local_rerank` 隔離保存；自 Phase 2.3 起 Review 預設改為 `user_evidence_top20`。工具在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。Report 依 strategy 分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
+
+### Phase 2.3 User-only Evidence Search
+
+Phase 2.2 的 dialogue 向量排序和 user-only 注入不一致，造成舊 assistant 提過答案的 chunk 排在前面，但真正包含 user 事實的「飽飽」落到 Rank 19。Phase 2.3 不增加同步 API 呼叫；同一 chunk 額外保存 user-only evidence embedding，Generation 搜尋與注入都以 user 原話為依據，原本本機安全過濾仍保留。
+
+部署與回填順序：
+
+1. 保持 `RETRIEVAL_GENERATION_ENABLED=false`；Shadow 與 UUID allowlist 可維持開啟。
+2. 先在 Supabase 套用 additive migration `015_retrieval_user_evidence.sql`。舊 server 不會使用新增欄位／RPC，因此此順序不影響聊天或 Shadow。
+3. 部署新 server。先 dry-run，只顯示缺少 evidence embedding 的合格／跳過筆數，不輸出全文：
+
+```bash
+npm run retrieval:evidence:backfill -- --user-id=<uuid>
+```
+
+4. 確認數量後回填；這會把既有合格 user 原話送至 OpenAI Embeddings API，重跑只處理仍為 null 的 chunks：
+
+```bash
+npm run retrieval:evidence:backfill -- --user-id=<uuid> --confirm
+```
+
+5. 再執行一次 dry-run，預期 `eligible: 0`。確認 Zeabur `RETRIEVAL_GENERATION_ENABLED=true` 後重啟。
+6. 不清除原本受污染測試資料，依序重測貓咪名字、第一次出國地點與哭泣地點。Run 應為 `selection_strategy=user_evidence_top20`、`search_strategy=user_only`、`candidate_count<=20`、`injected_count<=5`。正確證據應進入實際注入，而非只存在於未選 Rank 6～20。
+7. Review 預設只處理 `user_evidence_top20`；完成 10 個 injected runs，沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。舊 `top20_local_rerank` 結果不得混算。
+
+新 Shadow jobs 會在同一次 embedding batch 建立 query、dialogue 與 user evidence 三個向量；Shadow 搜尋仍使用 dialogue 向量，Generation 才使用 evidence 向量。Migration 必須早於新 server 部署，否則 worker 尚找不到新的雙向量 upsert RPC。
 
 ## Expo Go 與未來 Preview APK
 

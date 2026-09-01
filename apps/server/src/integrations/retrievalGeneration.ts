@@ -129,7 +129,7 @@ async function runRetrieval(
   try {
     let searchResult;
     try {
-      searchResult = await withDeadline(supabaseAdmin.rpc("match_retrieval_generation_chunks", {
+      searchResult = await withDeadline(supabaseAdmin.rpc("match_retrieval_generation_evidence_chunks", {
         p_user_id: input.userId,
         p_conversation_id: input.conversationId,
         p_query_sequence: beforeSequence,

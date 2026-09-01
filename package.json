@@ -15,6 +15,7 @@
     "test": "npm --workspace apps/server run test",
     "eval:retrieval": "npm --workspace apps/server run eval:retrieval --",
     "retrieval:shadow:backfill": "npm --workspace apps/server run retrieval:shadow:backfill --",
+    "retrieval:evidence:backfill": "npm --workspace apps/server run retrieval:evidence:backfill --",
     "retrieval:shadow:review": "npm --workspace apps/server run retrieval:shadow:review --",
     "retrieval:shadow:report": "npm --workspace apps/server run retrieval:shadow:report --",
     "retrieval:generation:review": "npm --workspace apps/server run retrieval:generation:review --",
