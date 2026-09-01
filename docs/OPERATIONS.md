@@ -194,25 +194,25 @@ Report 只輸出彙總數據至 gitignored `artifacts/retrieval-shadow/`。Phase
 
 Phase 2 會把所有安放模型上下文從最近 20 則改為 10 則；只有最終模式仍為 Deep、無圖片、非危機且 UUID 位於 `RETRIEVAL_SHADOW_USER_IDS` 的請求，才可能同步注入較舊 user 原話。這些 allowlist 聊天會將搜尋命中的歷史文字再次送至 OpenAI Responses API；Mobile API 不回傳候選或分數。
 
-Phase 2.1 Top 5 部署順序：
+Phase 2.2 Top 20 Local Evidence Rerank 部署順序：
 
 1. 確認 migration `012_retrieval_generation_canary.sql` 已套用，並先設定 `RETRIEVAL_GENERATION_ENABLED=false`。
 2. 部署 server，保持 Generation 關閉並確認 Light／Deep 正常。
-3. 套用 migration `013_retrieval_generation_top5.sql`；既有 rows 保留為 `threshold_top2`。
+3. 確認 migration `013_retrieval_generation_top5.sql` 已套用，再套用 `014_retrieval_generation_local_rerank.sql`；既有 rows 與人工標籤不重算。
 4. 確認 `RETRIEVAL_SHADOW_ENABLED=true`、UUID allowlist 與既有 chunks 正常，再設定 `RETRIEVAL_GENERATION_ENABLED=true` 重啟 server。
-5. 用 allowlist 帳號送 Deep 純文字 smoke test；有候選時應記為 `selection_strategy=top5_all`、`threshold=null`、`injected_count<=5`、`retrieval_tokens<=1200`。
-6. 檢查固定錯誤碼與 2 秒內 retrieval latency；聊天回覆 JSON 不得出現 retrieval metadata，並立刻以 review `--limit=1` 檢查實際注入與回覆。
+5. 分別詢問貓咪名字與第一次出國地點；預期回答「飽飽」與「中國武漢」，run 應為 `selection_strategy=top20_local_rerank`、`candidate_count<=20`、`injected_count<=5`、`threshold=null`、`retrieval_tokens<=1200`。
+6. 檢查固定的 embedding／search／source／total timeout error code 與 2.5 秒內 retrieval latency；聊天回覆 JSON 不得出現 retrieval metadata，並立刻以 review `--limit=1` 檢查選擇決策、實際注入與回覆。
 
-任何 embedding／DB／來源載入錯誤或 2 秒逾時都 fail-open，以最近 10 則完成聊天。立即回退只需將 `RETRIEVAL_GENERATION_ENABLED=false` 並重啟；Shadow 可保持開啟。Generation run/candidate 保存 30 天，由每分鐘 worker 清理。
+任何 embedding／DB／來源載入錯誤或 2.5 秒逾時都 fail-open，以最近 10 則完成聊天。立即回退只需將 `RETRIEVAL_GENERATION_ENABLED=false` 並重啟；Shadow 可保持開啟。Generation run/candidate 保存 30 天，由每分鐘 worker 清理。
 
 人工檢閱與報告：
 
 ```bash
-npm run retrieval:generation:review -- --user-id=<uuid> --limit=25
+npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
 npm run retrieval:generation:report
 ```
 
-Review 預設只處理 `top5_all`，在本機終端臨時 join 最近 10 則、本輪訊息、Top 5 candidates、實際去重／截斷後的 user-only 注入與最終回覆；候選標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。完整 25 個 injected runs 後，helpful 至少 50%，且 harmful、stale、sensitive、injected forbidden 均為 0 才算通過。Report 依 strategy 分組並額外顯示 irrelevant injected 比例、平均 injected chunks 與 token；只輸出脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
+Review 預設只處理 `top20_local_rerank`，在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。完整 10 個 injected runs 後，helpful 至少 50%、策略期間 timeout 不高於 10%，且 harmful、stale、sensitive、injected forbidden 均為 0；貓咪與出國固定 smoke cases 仍須人工確認。Report 依 strategy 分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
 
 ## Expo Go 與未來 Preview APK
 

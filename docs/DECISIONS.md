@@ -122,3 +122,11 @@
 - 背景：真實 Canary 的「貓咪名字」案例中，正確原話已存在於索引並位於 Rank 4／5，但 `0.60`／Top 2 策略 abstain；降低 threshold 只會先注入 Rank 1／2 的無關內容。
 - 決定：僅對知情 allowlist Deep Canary，忽略 similarity threshold，將 Top 5 的 user 原話全域去重並在 1,200-token 公平上限內交給既有生成模型；不增加 reranker API 呼叫。舊 assistant 回覆、圖片與危機內容仍不注入。
 - 影響：提高 Top 5 內正確細節可被使用的機會，但也增加無關、過時或敏感候選進 prompt 的風險；新舊 runs 必須以 strategy 分開檢閱，出現 harmful／stale／sensitive／forbidden 時立即關閉 Generation。
+
+## ADR-016：Top 20 本機 Evidence Rerank 與 2.5 秒同步上限
+
+- 日期：2026-09-01
+- 狀態：Accepted
+- 背景：`top5_all` 共 23 個 runs 中有 8 次逾時，最近 5 次皆在 2 秒觸發 fallback；非同步 Shadow 仍能找到「中國武漢」，但反覆的「記得貓咪名字嗎」測試 chunks 會擠掉真正包含「飽飽」的 user 原話。Dialogue embedding 可能受舊 assistant 回覆影響，實際注入卻只允許 user 原話。
+- 決定：同步上限提高至 2.5 秒；Generation 專用搜尋取 Top 20，再以不增加 API 呼叫的本機規則排除純記憶探問、固定低資訊與重複 user 內容，依原始向量 rank 注入最多 5 個合格候選。舊 assistant、圖片與危機內容仍不得注入。
+- 影響：預期提高事實 recall 並降低重複問句污染，但規則式分類仍可能漏掉特殊表達，因此以 `top20_local_rerank` 獨立觀測 10 個 reviewed injected runs；逾時率高於 10% 或出現任何 harmful／stale／sensitive／forbidden 時不得擴大 Canary。

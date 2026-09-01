@@ -51,6 +51,7 @@
 - **使用者實測完成**：Retrieval Phase 1.5 已部署並完成 smoke test；新版 run 成功完成且無錯誤，5 個候選皆早於最早 recent user context 的搜尋上界，確認不再召回與 query context 重疊的 chunks。Review 顯示完整 query context 並採真正分頁；既有 53／25 v1 基線不重算，修正只影響部署後的新 runs，結果仍不進 prompt。
 - **使用者實測中**：Retrieval Phase 2 已部署至單一 allowlist。最近 10 則與 012 schema 正常；首個真實精確事實案例的正解「飽飽」存在於索引與 Top 5，但只排 Rank 4／5，舊 `0.60`／Top 2 策略安全 abstain，揭露真實排序不足。
 - **已部署、使用者實測中**：Retrieval Phase 2.1 與 migration `013` 已上線。首筆成功 `top5_all` run 注入 5／5 candidates、retrieval 使用 172 tokens／823 ms，並正確回答貓咪名字「飽飽」；另有一筆在 2,003 ms 觸發 `generation_retrieval_timeout` 並安全 fallback。已完成 1／25 個 runs 的人工檢閱，尚不足以宣稱 Phase 2.1 通過。
+- **程式已完成、待部署實測**：Retrieval Phase 2.2 將同步上限改為 2.5 秒，Generation 專用搜尋擴至 Top 20，再以本機 evidence 規則排除純記憶探問、低資訊與重複 user 內容，最多注入 5 個合格候選。策略獨立記為 `top20_local_rerank`；migration `014`、review/report 與固定「飽飽／中國武漢」測試已加入，但 production migration 與 smoke test 尚未執行。
 
 ### Ava beta
 
@@ -76,8 +77,8 @@
 
 ## 近期優先順序
 
-1. 完成剩餘 24 個 `top5_all` 注入回覆的雙層人工檢閱，嚴格區分真正有幫助的 `acceptable` 與僅無害但無關的 `irrelevant`。
-2. 持續觀察 `generation_retrieval_timeout` 比例與 latency P50／P95，完成 Phase 2.1 脫敏報告後再做 go/no-go。
+1. 依 runbook 關閉 Generation、部署 Phase 2.2、套用 migration `014` 後再開啟，完成「飽飽／中國武漢」兩個固定 smoke cases。
+2. 累積並檢閱 10 個 `top20_local_rerank` injected runs，確認 helpful、錯誤召回、selection decisions 與 timeout rate；舊 `top5_all` 基線不混算。
 3. 長時間實測 Ava 延遲回覆、主動訊息、未讀與跨日生活脈絡。
 4. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。
 5. 在少量封測前補齊監控、錯誤可讀性、資料刪除與隱私說明。

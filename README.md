@@ -81,7 +81,7 @@ Retrieval Shadow mode 的回填、人工檢閱與脫敏報告為管理指令，�
 npm run retrieval:shadow:backfill -- --user-id=<uuid>
 npm run retrieval:shadow:review -- --user-id=<uuid> --limit=25
 npm run retrieval:shadow:report
-npm run retrieval:generation:review -- --user-id=<uuid> --limit=25
+npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
 npm run retrieval:generation:report
 ```
 
@@ -101,7 +101,7 @@ curl https://softplace.zeabur.app/health
 - 安放深度模式：`gpt-5.4-mini`
 - Ava：`gpt-5.4-mini`
 
-模型名稱由 server 環境變數控制。OpenAI Responses 預設 `store:false`；安放每次只送最近 10 則訊息與已確認記憶。Deep allowlist Canary 可另外加入去重、user-only、最多 1,200 tokens 的 Top 5 舊對話候選。
+模型名稱由 server 環境變數控制。OpenAI Responses 預設 `store:false`；安放每次只送最近 10 則訊息與已確認記憶。Deep allowlist Canary 可從 Top 20 舊對話中以本機 evidence 規則選出最多 5 個 user-only 候選，合計不超過 1,200 tokens。
 
 ## 文件索引
 

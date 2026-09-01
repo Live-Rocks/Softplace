@@ -152,7 +152,7 @@ Ava：`companion_definitions`、`ava_event_runs`、`companion_daily_states`、`u
 
 Retrieval Shadow：`retrieval_chunks`、`retrieval_shadow_jobs`、`retrieval_shadow_runs`、`retrieval_shadow_candidates`。只允許 service-role；chunks 保存向量與 message ID，不重複保存聊天全文。每分鐘 worker 非同步搜尋，結果不進 prompt 或 Mobile API。
 
-Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前同步搜尋 Top 5，Phase 2.1 將五個候選去重後以 user-only 形式交給同一次生成，整段最多 1,200 tokens。觀測資料以 `threshold_top2`／`top5_all` 分版，只保存 ID、分數、延遲、token 與人工標籤，30 天後清除。
+Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前同步搜尋 Top 20，Phase 2.2 以本機規則排除純記憶探問、低資訊與重複內容，再將最多五個 user-only 證據交給同一次生成，整段最多 1,200 tokens。觀測資料以 `threshold_top2`／`top5_all`／`top20_local_rerank` 分版，只保存 ID、分數、選擇決策、延遲、token 與人工標籤，30 天後清除。
 
 一般使用者可透過 RLS 讀取自己的核心資料；實際 App 寫入主要由 server 使用 service-role 完成。成本保護與 Ava 資料表不開放 anon／authenticated 直接存取，只允許 service-role 與受控 RPC。
 
@@ -161,7 +161,7 @@ Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generatio
 | 路徑 | 預設模型 | 上下文 |
 | --- | --- | --- |
 | 安放 light | `gpt-4o-mini` | 最近 10 則＋確認記憶＋light prompt |
-| 安放 deep | `gpt-5.4-mini` | 最近 10 則＋確認記憶；allowlist 可加最多 2 個 user-only retrieval candidates＋deep prompt |
+| 安放 deep | `gpt-5.4-mini` | 最近 10 則＋確認記憶；allowlist 可從 Top 20 加最多 5 個本機篩選的 user-only retrieval candidates＋deep prompt |
 | 安放圖片 | deep model | 同上，加單張壓縮圖片 |
 | Ava | `gpt-5.4-mini` | Worker 取得的近期訊息、關係、低敏感記憶與生活情境 |
 

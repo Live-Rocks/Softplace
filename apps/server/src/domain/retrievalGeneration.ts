@@ -5,11 +5,11 @@ import { RETRIEVAL_SHADOW, isEligibleShadowMessage, truncate } from "./retrieval
 export const RETRIEVAL_GENERATION = {
   historyLimit: 10,
   baselineHistoryLimit: 20,
-  candidateLimit: 5,
+  candidateLimit: 20,
   injectionLimit: 5,
-  selectionStrategy: "top5_all",
+  selectionStrategy: "top20_local_rerank",
   tokenBudget: 1200,
-  timeoutMs: 2000,
+  timeoutMs: 2500,
   retentionDays: 30
 } as const;
 
@@ -24,6 +24,19 @@ export type GenerationCandidate = {
   source: GenerationCandidateSource[];
 };
 
+export type GenerationSelectionDecision =
+  | "selected"
+  | "recall_probe_only"
+  | "boilerplate_only"
+  | "duplicate"
+  | "not_selected"
+  | "invalid_source";
+
+export type RankedGenerationCandidate = GenerationCandidate & {
+  selectionRank: number | null;
+  selectionDecision: GenerationSelectionDecision;
+};
+
 export type PreparedGenerationContext = {
   text: string;
   tokenCount: number;
@@ -31,6 +44,12 @@ export type PreparedGenerationContext = {
 };
 
 const encoder = get_encoding("o200k_base");
+const BOILERPLATE = new Set(["好", "好呀", "好的", "嗯", "喔", "哦", "謝謝", "我來了", "測試", "測試訊息"]);
+const MEMORY_RECALL_PATTERNS = ["記得", "想得起", "有印象"] as const;
+const FACT_LOOKUP_PATTERNS = [
+  "叫什麼", "什麼名字", "去哪裡", "去了哪裡", "在哪裡",
+  "是誰", "是什麼", "什麼時候", "多少", "哪一個", "哪個"
+] as const;
 
 export function countTokens(value: string) {
   return encoder.encode(value).length;
@@ -53,6 +72,53 @@ export function generationSearchBeforeSequence(history: Message[]) {
   return history[0]?.sequence ?? null;
 }
 
+export function rerankGenerationCandidates(
+  candidates: GenerationCandidate[],
+  injectionLimit = RETRIEVAL_GENERATION.injectionLimit
+): RankedGenerationCandidate[] {
+  const seenIds = new Set<string>();
+  const seenContent = new Set<string>();
+  let selectionRank = 0;
+
+  return [...candidates].sort((left, right) => left.rank - right.rank).map((candidate) => {
+    const userMessages = candidate.source
+      .filter((message) => message.role === "user")
+      .sort((left, right) => left.sequence - right.sequence);
+    if (!userMessages.length) return ranked(candidate, null, "invalid_source", []);
+
+    const evidence = userMessages.filter((message) => classifyGenerationMessage(message.content) === "evidence");
+    if (!evidence.length) {
+      const allBoilerplate = userMessages.every((message) => classifyGenerationMessage(message.content) === "boilerplate");
+      return ranked(candidate, null, allBoilerplate ? "boilerplate_only" : "recall_probe_only", []);
+    }
+
+    const uniqueEvidence = evidence.filter((message) => {
+      const normalized = normalizeGenerationText(message.content);
+      if (seenIds.has(message.id) || seenContent.has(normalized)) return false;
+      seenIds.add(message.id);
+      seenContent.add(normalized);
+      return true;
+    });
+    if (!uniqueEvidence.length) return ranked(candidate, null, "duplicate", []);
+    if (selectionRank >= injectionLimit) return ranked(candidate, null, "not_selected", uniqueEvidence);
+    selectionRank += 1;
+    return ranked(candidate, selectionRank, "selected", uniqueEvidence);
+  });
+}
+
+export function classifyGenerationMessage(content: string): "evidence" | "recall_probe" | "boilerplate" {
+  const clauses = content.split(/[\n,，。；;！!？?]+/u).map(normalizeGenerationText).filter(Boolean);
+  if (!clauses.length || clauses.every((clause) => BOILERPLATE.has(clause))) return "boilerplate";
+  if (clauses.some((clause) => !BOILERPLATE.has(clause) && !isRecallProbeClause(clause))) {
+    return "evidence";
+  }
+  return "recall_probe";
+}
+
+export function normalizeGenerationText(content: string) {
+  return content.normalize("NFKC").toLocaleLowerCase("zh-Hant").replace(/[\p{P}\p{S}\s]+/gu, "");
+}
+
 export function prepareGenerationContext(
   candidates: GenerationCandidate[],
   options: { injectionLimit?: number; tokenBudget?: number } = {}
@@ -60,6 +126,7 @@ export function prepareGenerationContext(
   const injectionLimit = options.injectionLimit ?? RETRIEVAL_GENERATION.injectionLimit;
   const tokenBudget = options.tokenBudget ?? RETRIEVAL_GENERATION.tokenBudget;
   const seenMessages = new Set<string>();
+  const seenContent = new Set<string>();
   const candidatesWithUniqueUserMessages: ContextCandidate[] = [];
 
   for (const candidate of [...candidates].sort((left, right) => left.rank - right.rank).slice(0, injectionLimit)) {
@@ -67,8 +134,10 @@ export function prepareGenerationContext(
       .filter((message) => message.role === "user")
       .filter((message) => {
         const key = `${message.id}:${message.sequence}`;
-        if (seenMessages.has(key)) return false;
+        const normalized = normalizeGenerationText(message.content);
+        if (seenMessages.has(key) || seenContent.has(normalized)) return false;
         seenMessages.add(key);
+        seenContent.add(normalized);
         return true;
       })
       .sort((left, right) => left.sequence - right.sequence);
@@ -163,11 +232,31 @@ function formatContext(candidates: Array<{ rank: number; userMessages: string[] 
 export function retrievalGenerationErrorCode(error: unknown) {
   const allowed = new Set([
     "generation_retrieval_timeout",
+    "generation_embedding_timeout",
+    "generation_search_timeout",
+    "generation_source_timeout",
     "generation_embedding_unconfigured",
+    "generation_embedding_failed",
     "generation_embedding_invalid",
     "generation_search_failed",
     "generation_source_failed"
   ]);
   const value = error instanceof Error ? error.message : "generation_retrieval_failed";
   return allowed.has(value) ? value : "generation_retrieval_failed";
+}
+
+function ranked(
+  candidate: GenerationCandidate,
+  selectionRank: number | null,
+  selectionDecision: GenerationSelectionDecision,
+  source: GenerationCandidateSource[]
+): RankedGenerationCandidate {
+  return { ...candidate, source, selectionRank, selectionDecision };
+}
+
+function isRecallProbeClause(clause: string) {
+  if (FACT_LOOKUP_PATTERNS.some((pattern) => clause.includes(pattern))) return true;
+  const mentionsRecall = MEMORY_RECALL_PATTERNS.some((pattern) => clause.includes(pattern));
+  const addressesAssistant = clause.includes("你記得") || clause.includes("你還記得") || clause.startsWith("你想得起");
+  return mentionsRecall && (addressesAssistant || clause.endsWith("嗎") || clause.endsWith("呢"));
 }

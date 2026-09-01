@@ -5,7 +5,11 @@ import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import type { Message } from "@softplace/shared";
 import { config } from "../config.js";
-import { prepareGenerationContext, type GenerationCandidate } from "../domain/retrievalGeneration.js";
+import {
+  classifyGenerationMessage,
+  prepareGenerationContext,
+  type GenerationCandidate
+} from "../domain/retrievalGeneration.js";
 import { scanReviewRuns } from "./retrievalShadowReview.js";
 import { supabaseAdmin } from "../integrations/supabase.js";
 
@@ -15,7 +19,7 @@ const REVIEW_PAGE_SIZE = 50;
 
 export async function main(argv = process.argv.slice(2)) {
   const userId = value(argv, "user-id");
-  const limit = Number(value(argv, "limit") ?? 25);
+  const limit = Number(value(argv, "limit") ?? 10);
   if (!userId || !Number.isInteger(limit) || limit < 1) throw new Error("valid --user-id and --limit are required");
   if (!config.retrievalShadowUserIds.has(userId)) throw new Error("user is not in RETRIEVAL_SHADOW_USER_IDS");
   if (!supabaseAdmin) throw new Error("Supabase configuration is required");
@@ -29,18 +33,18 @@ export async function main(argv = process.argv.slice(2)) {
       async loadPage(from, to) {
         const { data, error } = await db.from("retrieval_generation_runs")
           .select("id,query_message_id,assistant_message_id,response_effect,stale_detected,sensitive_detected,created_at")
-          .eq("user_id", userId).eq("status", "injected").eq("selection_strategy", "top5_all")
+          .eq("user_id", userId).eq("status", "injected").eq("selection_strategy", "top20_local_rerank")
           .order("created_at", { ascending: true }).range(from, to);
         if (error) throw new Error("generation_review_read_failed");
         return data ?? [];
       },
       async reviewRun(run) {
         const { data: candidateRows, error: candidateError } = await db.from("retrieval_generation_candidates")
-          .select("id,chunk_id,rank,score,injected,review_label")
+          .select("id,chunk_id,rank,score,injected,selection_rank,selection_decision,review_label")
           .eq("run_id", run.id).order("rank");
         if (candidateError) throw new Error("generation_review_read_failed");
         const candidates = await loadCandidates(candidateRows ?? []);
-        const pendingCandidates = candidates.filter((candidate) => !candidate.review_label);
+        const pendingCandidates = candidates.filter((candidate) => candidate.injected && !candidate.review_label);
         const needsResponseReview = !run.response_effect;
         if (!pendingCandidates.length && !needsResponseReview) return false;
 
@@ -58,6 +62,7 @@ export async function main(argv = process.argv.slice(2)) {
         const history = (historyRows ?? []).reverse().map(mapMessage);
         const prepared = prepareGenerationContext(candidates.filter((candidate) => candidate.injected).map(toDomainCandidate));
         console.info(formatGenerationReviewHeader(run.id, history, query.content, prepared?.text ?? "[missing]", assistant.content));
+        console.info(formatGenerationCandidateDecisions(candidates));
 
         for (const candidate of pendingCandidates) {
           const answer = (await rl.question(`${formatGenerationCandidate(candidate)}\n${candidate.dialogue || "[missing]"}\n[m]ust [a]cceptable [f]orbidden [i]rrelevant: `)).trim().toLowerCase();
@@ -133,7 +138,24 @@ export function formatGenerationReviewHeader(
 }
 
 export function formatGenerationCandidate(candidate: { rank: number; score: number; injected: boolean }) {
-  return `#${candidate.rank} score=${Number(candidate.score).toFixed(4)} injected=${candidate.injected ? "yes" : "no"}`;
+  const detailed = candidate as typeof candidate & { selection_rank?: number | null; selection_decision?: string };
+  return [
+    `#${candidate.rank}`,
+    `score=${Number(candidate.score).toFixed(4)}`,
+    `injected=${candidate.injected ? "yes" : "no"}`,
+    `selection_rank=${detailed.selection_rank ?? "-"}`,
+    `decision=${detailed.selection_decision ?? (candidate.injected ? "selected" : "not_selected")}`
+  ].join(" ");
+}
+
+export function formatGenerationCandidateDecisions(candidates: Array<any>) {
+  return [
+    "Candidate decisions:",
+    ...candidates.map((candidate) => [
+      formatGenerationCandidate(candidate),
+      candidate.dialogue || "[missing]"
+    ].join("\n"))
+  ].join("\n");
 }
 
 export function yesNo(value: string) {
@@ -150,7 +172,9 @@ function toDomainCandidate(candidate: any): GenerationCandidate {
     score: Number(candidate.score),
     startSequence: candidate.startSequence,
     endSequence: candidate.endSequence,
-    source: candidate.source
+    source: candidate.source.filter((message: any) =>
+      message.role === "user" && classifyGenerationMessage(message.content) === "evidence"
+    )
   };
 }
 

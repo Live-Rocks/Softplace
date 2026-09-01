@@ -5,12 +5,15 @@ import type { Message } from "@softplace/shared";
 import {
   RETRIEVAL_GENERATION,
   buildGenerationQuery,
+  classifyGenerationMessage,
   countTokens,
   generationSearchBeforeSequence,
   prepareGenerationContext,
+  rerankGenerationCandidates,
   retrievalGenerationErrorCode,
   type GenerationCandidate
 } from "../src/domain/retrievalGeneration.js";
+import { isValidGenerationSourceWindow, withDeadline } from "../src/integrations/retrievalGeneration.js";
 import { buildGenerationReport } from "../src/scripts/retrievalGenerationReport.js";
 import { formatGenerationCandidate, formatGenerationReviewHeader, yesNo } from "../src/scripts/retrievalGenerationReview.js";
 
@@ -29,13 +32,92 @@ test("generation query uses two recent eligible user messages and history cutoff
   assert.equal(generationSearchBeforeSequence([]), null);
 });
 
+test("generation constants use top twenty local rerank with a 2.5 second deadline", () => {
+  assert.equal(RETRIEVAL_GENERATION.candidateLimit, 20);
+  assert.equal(RETRIEVAL_GENERATION.injectionLimit, 5);
+  assert.equal(RETRIEVAL_GENERATION.selectionStrategy, "top20_local_rerank");
+  assert.equal(RETRIEVAL_GENERATION.timeoutMs, 2500);
+});
+
+test("local evidence rerank removes repeated cat-name probes and selects the lower-ranked fact", () => {
+  const candidates = [
+    candidate("probe-1", 1, 0.70, [message("p1", 1, "user", "你還記得那隻貓咪的名字嗎？")]),
+    candidate("probe-2", 2, 0.68, [message("p2", 2, "user", "我幫那隻貓取什麼名字？")]),
+    candidate("probe-3", 3, 0.66, [message("p3", 3, "user", "你對牠有印象嗎？")]),
+    candidate("probe-4", 4, 0.64, [message("p4", 4, "user", "測試訊息")]),
+    candidate("probe-5", 5, 0.62, [message("p5", 5, "user", "我來了"), message("p6", 6, "user", "牠叫什麼？")]),
+    candidate("fact", 9, 0.55, [message("fact-user", 9, "user", "我幫他取名叫 飽飽")])
+  ];
+  const reranked = rerankGenerationCandidates(candidates);
+  assert.deepEqual(reranked.slice(0, 5).map((item) => item.selectionDecision), [
+    "recall_probe_only", "recall_probe_only", "recall_probe_only", "boilerplate_only", "recall_probe_only"
+  ]);
+  const fact = reranked.find((item) => item.chunkId === "fact");
+  assert.equal(fact?.selectionDecision, "selected");
+  assert.equal(fact?.selectionRank, 1);
+  const prepared = prepareGenerationContext(reranked.filter((item) => item.selectionDecision === "selected"));
+  assert.match(prepared?.text ?? "", /飽飽/);
+  assert.doesNotMatch(prepared?.text ?? "", /記得|測試訊息|我來了/);
+});
+
+test("local evidence rerank can recover a trip fact at rank twenty and keeps mixed factual questions", () => {
+  const candidates = Array.from({ length: 20 }, (_, index) => candidate(
+    `c-${index + 1}`,
+    index + 1,
+    0.8 - index * 0.01,
+    [message(`u-${index + 1}`, index + 1, "user", index === 19
+      ? "我前陣子第一次出國，去了中國武漢"
+      : `你還記得第${index + 1}件事嗎？`)]
+  ));
+  const selected = rerankGenerationCandidates(candidates).filter((item) => item.selectionDecision === "selected");
+  assert.deepEqual(selected.map((item) => item.chunkId), ["c-20"]);
+  assert.equal(classifyGenerationMessage("我明天要去台北，你覺得呢？"), "evidence");
+  assert.equal(classifyGenerationMessage("我第一次出國去了哪裡？"), "recall_probe");
+  assert.equal(classifyGenerationMessage("我記得第一次出國去了中國武漢"), "evidence");
+  assert.equal(classifyGenerationMessage("我對那裡很有印象"), "evidence");
+});
+
+test("local evidence rerank removes exact user duplicates and never fills with filtered candidates", () => {
+  const shared = message("shared", 1, "user", "我喜歡橘色");
+  const reranked = rerankGenerationCandidates([
+    candidate("first", 1, 0.8, [shared]),
+    candidate("duplicate-id", 2, 0.7, [shared]),
+    candidate("duplicate-text", 3, 0.6, [message("other", 3, "user", "我喜歡橘色！")]),
+    candidate("invalid", 4, 0.5, []),
+    candidate("probe", 5, 0.4, [message("probe", 5, "user", "你記得嗎？")])
+  ]);
+  assert.deepEqual(reranked.map((item) => item.selectionDecision), [
+    "selected", "duplicate", "duplicate", "invalid_source", "recall_probe_only"
+  ]);
+  assert.equal(reranked.filter((item) => item.selectionDecision === "selected").length, 1);
+});
+
+test("local evidence rerank selects at most five and marks later qualified candidates", () => {
+  const reranked = rerankGenerationCandidates(Array.from({ length: 7 }, (_, index) => candidate(
+    `fact-${index + 1}`, index + 1, 0.8 - index * 0.01,
+    [message(`fact-user-${index + 1}`, index + 1, "user", `我喜歡第${index + 1}種顏色`)]
+  )));
+  assert.deepEqual(reranked.slice(0, 5).map((item) => item.selectionRank), [1, 2, 3, 4, 5]);
+  assert.deepEqual(reranked.slice(5).map((item) => item.selectionDecision), ["not_selected", "not_selected"]);
+});
+
+test("generation source windows reject images, crisis content, and invalid role order", () => {
+  const safe = [
+    { role: "user" }, { role: "assistant" }, { role: "user" }
+  ];
+  assert.equal(isValidGenerationSourceWindow(safe), true);
+  assert.equal(isValidGenerationSourceWindow(safe.map((row, index) => ({ ...row, image_present: index === 0 }))), false);
+  assert.equal(isValidGenerationSourceWindow(safe.map((row, index) => ({ ...row, crisis_detected: index === 2 }))), false);
+  assert.equal(isValidGenerationSourceWindow([{ role: "user" }, { role: "user" }, { role: "assistant" }]), false);
+});
+
 test("generation context injects all five candidates regardless of score and never includes assistant text", () => {
   const candidates = [
     candidate("c1", 1, 0.72, [message("old-u1", 1, "user", "第一次被改企劃"), message("old-a1", 2, "assistant", "舊助理推論"), message("old-u2", 3, "user", "那次也很慌")]),
     candidate("c2", 2, 0.66, [message("old-u2", 3, "user", "那次也很慌"), message("old-a2", 4, "assistant", "另一段舊回答"), message("old-u3", 5, "user", "後來同事來幫忙")]),
     candidate("c3", 3, 0.44, [message("u3", 7, "user", "第三段低分候選")]),
     candidate("c4", 4, 0.31, [message("u4", 9, "user", "我幫他取名叫 飽飽")]),
-    candidate("c5", 5, 0.20, [message("u5", 11, "user", "第五段也會送出")]),
+    candidate("c5", 5, 0.20, [message("u5", 11, "user", "第五段也會送出"), message("copy", 12, "user", "那次也很慌！")]),
     candidate("c6", 6, 0.99, [message("u6", 13, "user", "超過 Top 5")])
   ];
   const prepared = prepareGenerationContext(candidates);
@@ -52,7 +134,12 @@ test("generation context fairly shares the 1200-token budget without dropping la
     `large-${index + 1}`,
     index + 1,
     0.59 - index * 0.05,
-    [message(`large-u-${index + 1}`, index + 1, "user", `${index === 4 ? "我幫他取名叫 飽飽。" : ""}繁體中文內容🙂`.repeat(1000))]
+    [message(
+      `large-u-${index + 1}`,
+      index + 1,
+      "user",
+      `第${index + 1}段。${index === 4 ? "我幫他取名叫 飽飽。" : ""}${"繁體中文內容🙂".repeat(1000)}`
+    )]
   )));
   assert.ok(prepared);
   assert.ok(prepared.tokenCount <= RETRIEVAL_GENERATION.tokenBudget);
@@ -69,7 +156,10 @@ test("generation review formatting identifies injected candidates and validates 
   assert.match(header, /Current query: 現在呢/);
   assert.match(header, /Injected user-only context: \{context\}/);
   assert.match(header, /Generated response: 生成回覆/);
-  assert.equal(formatGenerationCandidate({ rank: 2, score: 0.65432, injected: true }), "#2 score=0.6543 injected=yes");
+  assert.equal(
+    formatGenerationCandidate({ rank: 2, score: 0.65432, injected: true }),
+    "#2 score=0.6543 injected=yes selection_rank=- decision=selected"
+  );
   assert.equal(yesNo("y"), true);
   assert.equal(yesNo("N"), false);
   assert.throws(() => yesNo("maybe"), /invalid yes\/no/);
@@ -107,9 +197,55 @@ test("generation report requires 25 reviewed injected runs, half helpful, and ze
   assert.equal(buildGenerationReport([...runs, ...historical], candidates).review.reviewedInjectedRuns, 25);
 });
 
+test("phase 2.2 report isolates local rerank, reviews only injected candidates, and gates timeout rate", () => {
+  const injectedRuns = Array.from({ length: 10 }, (_, index) => ({
+    id: `local-${index}`,
+    status: "injected" as const,
+    selection_strategy: "top20_local_rerank" as const,
+    injected_count: 2,
+    embedding_latency_ms: 500,
+    search_latency_ms: 300,
+    total_retrieval_latency_ms: 800,
+    history_10_tokens: 500,
+    history_20_tokens: 1200,
+    retrieval_tokens: 180,
+    actual_input_tokens: 1400,
+    output_tokens: 100,
+    response_effect: index < 5 ? "helpful" as const : "neutral" as const,
+    stale_detected: false,
+    sensitive_detected: false,
+    error_code: null
+  }));
+  const timeout = {
+    ...injectedRuns[0]!, id: "timeout", status: "fallback" as const, injected_count: 0,
+    response_effect: null, stale_detected: null, sensitive_detected: null,
+    error_code: "generation_embedding_timeout"
+  };
+  const candidates = injectedRuns.flatMap((run) => [
+    { run_id: run.id, injected: true, selection_decision: "selected", review_label: "must" },
+    { run_id: run.id, injected: false, selection_decision: "recall_probe_only", review_label: null }
+  ]);
+  const report = buildGenerationReport([...injectedRuns, timeout], candidates);
+  assert.equal(report.phase22.review.reviewedInjectedRuns, 10);
+  assert.equal(report.phase22.timeoutRate, 1 / 11);
+  assert.equal(report.phase22.selectionDecisions.recall_probe_only, 10);
+  assert.equal(report.phase22.metricsPass, true);
+  const secondTimeout = { ...timeout, id: "timeout-2" };
+  assert.equal(buildGenerationReport([...injectedRuns, timeout, secondTimeout], candidates).phase22.metricsPass, false);
+});
+
 test("generation errors are redacted to fixed codes", () => {
   assert.equal(retrievalGenerationErrorCode(new Error("generation_search_failed")), "generation_search_failed");
+  assert.equal(retrievalGenerationErrorCode(new Error("generation_embedding_failed")), "generation_embedding_failed");
+  assert.equal(retrievalGenerationErrorCode(new Error("generation_source_timeout")), "generation_source_timeout");
   assert.equal(retrievalGenerationErrorCode(new Error("private provider message")), "generation_retrieval_failed");
+});
+
+test("generation deadline returns the fixed stage error code", async () => {
+  await assert.rejects(
+    withDeadline(new Promise<never>(() => undefined), performance.now() + 5, "generation_search_timeout"),
+    /generation_search_timeout/
+  );
 });
 
 test("generation migration enforces service-role isolation, fixed canary constants, cleanup, and cascades", async () => {
@@ -144,9 +280,27 @@ test("top five recording, review, and reporting explicitly isolate the new strat
     fs.readFile(new URL("../src/scripts/retrievalGenerationReport.ts", import.meta.url), "utf8")
   ]);
   assert.match(integration, /p_selection_strategy: RETRIEVAL_GENERATION\.selectionStrategy/);
-  assert.match(review, /\.eq\("selection_strategy", "top5_all"\)/);
+  assert.match(review, /\.eq\("selection_strategy", "top20_local_rerank"\)/);
   assert.match(report, /run\.selection_strategy === "top5_all"/);
   assert.match(report, /run\.selection_strategy === "threshold_top2"/);
+  assert.match(report, /run\.selection_strategy === "top20_local_rerank"/);
+});
+
+test("local rerank migration preserves old strategies and isolates the top twenty RPC", async () => {
+  const sql = await fs.readFile(new URL("../../../supabase/migrations/014_retrieval_generation_local_rerank.sql", import.meta.url), "utf8");
+  assert.match(sql, /match_retrieval_generation_chunks/);
+  assert.match(sql, /limit least\(greatest\(p_limit, 1\), 20\)/);
+  assert.match(sql, /c\.user_id = p_user_id/);
+  assert.match(sql, /c\.conversation_id = p_conversation_id/);
+  assert.match(sql, /c\.end_sequence < p_query_sequence/);
+  assert.match(sql, /selection_strategy = 'threshold_top2'/);
+  assert.match(sql, /selection_strategy = 'top5_all'/);
+  assert.match(sql, /selection_strategy = 'top20_local_rerank'/);
+  assert.match(sql, /candidate_limit = 20/);
+  assert.match(sql, /rank between 1 and 20/);
+  assert.match(sql, /selection_rank/);
+  assert.match(sql, /recall_probe_only/);
+  assert.match(sql, /to service_role/);
 });
 
 function candidate(chunkId: string, rank: number, score: number, source: Message[]): GenerationCandidate {

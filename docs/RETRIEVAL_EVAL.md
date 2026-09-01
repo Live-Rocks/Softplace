@@ -99,7 +99,15 @@ artifacts/retrieval-eval/reports/<timestamp>/report.md
 - Review/report 只以 `top5_all` 新 runs 計算 Phase 2.1 gate，並分別保留 `threshold_top2` 歷史基線、irrelevant injected 比例、平均 injected chunks 與 token 指標。
 - 2026-08-15 初始 smoke test：首筆成功 run 注入 5／5 candidates，retrieval 為 172 tokens／823 ms，並從原本位於 Rank 4／5 的正確原話回答「飽飽」，證明 Top 5 能補足舊 Top 2 的這次 recall miss；同批另有一筆在 2,003 ms timeout 後安全 fallback。
 - 目前僅完成 1／25 個 `top5_all` runs 的人工檢閱，尚不宣稱 Phase 2.1 通過，也不將尚待語意確認的 candidate label 分布寫入基線。
-- 若 Top 5 提高 recall，但 25-run 檢閱顯示無關、過時或敏感注入偏高，Phase 2.2 再評估以 rerank 將 Top 5 重排後只注入最相關的 1～2 個候選，並衡量額外延遲。
+- Phase 2.1 原先預留額外 reranker 的方向；後續真實失敗同時包含 timeout 與重複探問污染，因此由下述 Phase 2.2 Top 20 本機 evidence rerank 取代，不增加線上模型呼叫。
+
+## Phase 2.2 Top 20 Local Evidence Rerank
+
+- 後續診斷顯示 `top5_all` 共 23 runs 有 8 次 timeout（34.8%），最近 5 次全數在 2 秒 fallback；相同訊息的 Shadow 搜尋仍正常完成，因此同步總上限先提高至 2.5 秒，並分開記錄 embedding／search／source timeout code。
+- 「第一次出國」正確的「中國武漢」仍位於 Shadow Rank 1 或 Rank 5；「貓咪名字」則被多個只有「記得名字嗎」而沒有 user 答案的測試 chunks 擠出 Top 5。這表示除了 timeout，還存在 dialogue embedding 與 user-only 注入內容不一致造成的候選污染。
+- 新策略 `top20_local_rerank` 不新增模型呼叫：先取 Top 20，再排除純記憶探問、固定低資訊、無效來源與重複 user 原話；保留原始向量順序並只注入最多 5 個合格候選，不足 5 個不補滿。
+- 每個候選保存原始 rank／score、selection rank 與固定 decision；Review 只要求標註實際 injected candidates，但會顯示完整候選池與排除原因。Report 與舊 `threshold_top2`／`top5_all` 完全分開。
+- Phase 2.2 需人工確認「飽飽／中國武漢」固定案例、完成 10 個 reviewed injected runs、helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0；程式完成不代表 Canary 已通過。
 
 ## 修改資料集
 

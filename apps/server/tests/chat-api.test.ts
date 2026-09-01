@@ -201,7 +201,10 @@ test("deep allowlist canary injects user-only retrieval while keeping the Mobile
           return {
             status: "injected",
             context: "{\"type\":\"retrieved_user_history\"}",
-            candidates: [{ chunkId: "chunk-1", rank: 1, score: 0.7, injected: true }],
+            candidates: [{
+              chunkId: "chunk-1", rank: 1, score: 0.7, injected: true,
+              selectionRank: 1, selectionDecision: "selected"
+            }],
             embeddingLatencyMs: 20,
             searchLatencyMs: 10,
             totalLatencyMs: 30,

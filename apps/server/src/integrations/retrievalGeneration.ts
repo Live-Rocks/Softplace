@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { APIConnectionTimeoutError } from "openai";
 import type { Message } from "@softplace/shared";
 import { config } from "../config.js";
 import {
@@ -6,8 +6,10 @@ import {
   buildGenerationQuery,
   generationSearchBeforeSequence,
   prepareGenerationContext,
+  rerankGenerationCandidates,
   retrievalGenerationErrorCode,
-  type GenerationCandidate
+  type GenerationCandidate,
+  type GenerationSelectionDecision
 } from "../domain/retrievalGeneration.js";
 import { RETRIEVAL_SHADOW } from "../domain/retrievalShadow.js";
 import { supabaseAdmin } from "./supabase.js";
@@ -15,7 +17,14 @@ import { supabaseAdmin } from "./supabase.js";
 export type GenerationRetrievalResult = {
   status: "injected" | "abstained" | "fallback";
   context: string | null;
-  candidates: Array<{ chunkId: string; rank: number; score: number; injected: boolean }>;
+  candidates: Array<{
+    chunkId: string;
+    rank: number;
+    score: number;
+    injected: boolean;
+    selectionRank: number | null;
+    selectionDecision: GenerationSelectionDecision;
+  }>;
   embeddingLatencyMs: number;
   searchLatencyMs: number;
   totalLatencyMs: number;
@@ -58,15 +67,17 @@ export function retrievalGenerationEnabledFor(userId: string) {
 
 export async function retrieveForGeneration(input: GenerationRetrievalInput): Promise<GenerationRetrievalResult> {
   const started = performance.now();
+  const deadline = started + RETRIEVAL_GENERATION.timeoutMs;
+  const timings = { embeddingLatencyMs: 0, searchLatencyMs: 0 };
   try {
-    return await withTimeout(runRetrieval(input, started), RETRIEVAL_GENERATION.timeoutMs);
+    return await runRetrieval(input, started, deadline, timings);
   } catch (error) {
     return {
       status: "fallback",
       context: null,
       candidates: [],
-      embeddingLatencyMs: 0,
-      searchLatencyMs: 0,
+      embeddingLatencyMs: timings.embeddingLatencyMs,
+      searchLatencyMs: timings.searchLatencyMs,
       totalLatencyMs: Math.max(0, Math.round(performance.now() - started)),
       retrievalTokens: 0,
       errorCode: retrievalGenerationErrorCode(error)
@@ -74,7 +85,12 @@ export async function retrieveForGeneration(input: GenerationRetrievalInput): Pr
   }
 }
 
-async function runRetrieval(input: GenerationRetrievalInput, started: number): Promise<GenerationRetrievalResult> {
+async function runRetrieval(
+  input: GenerationRetrievalInput,
+  started: number,
+  deadline: number,
+  timings: { embeddingLatencyMs: number; searchLatencyMs: number }
+): Promise<GenerationRetrievalResult> {
   if (!supabaseAdmin) throw new Error("generation_search_failed");
   const beforeSequence = generationSearchBeforeSequence(input.history);
   if (beforeSequence === null) return emptyResult(started);
@@ -87,40 +103,72 @@ async function runRetrieval(input: GenerationRetrievalInput, started: number): P
   if (!client) throw new Error("generation_embedding_unconfigured");
 
   const embeddingStarted = performance.now();
-  const response = await client.embeddings.create({
-    model: RETRIEVAL_SHADOW.model,
-    dimensions: RETRIEVAL_SHADOW.dimensions,
-    input: query.text,
-    encoding_format: "float"
-  });
-  const embeddingLatencyMs = Math.max(0, Math.round(performance.now() - embeddingStarted));
+  let response;
+  try {
+    try {
+      response = await withDeadline(client.embeddings.create({
+        model: RETRIEVAL_SHADOW.model,
+        dimensions: RETRIEVAL_SHADOW.dimensions,
+        input: query.text,
+        encoding_format: "float"
+      }), deadline, "generation_embedding_timeout");
+    } catch (error) {
+      if (error instanceof APIConnectionTimeoutError || errorMessage(error) === "generation_embedding_timeout") {
+        throw new Error("generation_embedding_timeout");
+      }
+      throw new Error("generation_embedding_failed");
+    }
+  } finally {
+    timings.embeddingLatencyMs = Math.max(0, Math.round(performance.now() - embeddingStarted));
+  }
   const embedding = response.data[0]?.embedding;
   if (!embedding || embedding.length !== RETRIEVAL_SHADOW.dimensions) throw new Error("generation_embedding_invalid");
 
   const searchStarted = performance.now();
-  const { data, error } = await supabaseAdmin.rpc("match_retrieval_shadow_chunks", {
-    p_user_id: input.userId,
-    p_conversation_id: input.conversationId,
-    p_query_sequence: beforeSequence,
-    p_query_embedding: vector(embedding),
-    p_limit: RETRIEVAL_GENERATION.candidateLimit
-  });
-  if (error) throw new Error("generation_search_failed");
-  const ranked: Array<{ chunkId: string; score: number; rank: number }> = (data ?? []).map((row: any, index: number) => ({
-    chunkId: row.chunk_id as string,
-    score: Number(row.score),
-    rank: index + 1
-  }));
-  const candidates = await loadCandidateSources(input, ranked);
-  const searchLatencyMs = Math.max(0, Math.round(performance.now() - searchStarted));
-  const prepared = prepareGenerationContext(candidates);
-  const injected = new Set(prepared?.injectedChunkIds ?? []);
+  let candidates: GenerationCandidate[];
+  try {
+    let searchResult;
+    try {
+      searchResult = await withDeadline(supabaseAdmin.rpc("match_retrieval_generation_chunks", {
+        p_user_id: input.userId,
+        p_conversation_id: input.conversationId,
+        p_query_sequence: beforeSequence,
+        p_query_embedding: vector(embedding),
+        p_limit: RETRIEVAL_GENERATION.candidateLimit
+      }), deadline, "generation_search_timeout");
+    } catch (error) {
+      if (errorMessage(error) === "generation_search_timeout") throw error;
+      throw new Error("generation_search_failed");
+    }
+    const { data, error } = searchResult;
+    if (error) throw new Error("generation_search_failed");
+    const ranked: RankedChunk[] = (data ?? []).map((row: any, index: number) => ({
+      chunkId: row.chunk_id as string,
+      score: Number(row.score),
+      rank: Number(row.vector_rank ?? index + 1),
+      startSequence: Number(row.start_sequence),
+      endSequence: Number(row.end_sequence)
+    }));
+    candidates = await withDeadline(loadCandidateSources(input, ranked), deadline, "generation_source_timeout");
+  } finally {
+    timings.searchLatencyMs = Math.max(0, Math.round(performance.now() - searchStarted));
+  }
+  const reranked = rerankGenerationCandidates(candidates);
+  const prepared = prepareGenerationContext(reranked.filter((candidate) => candidate.selectionDecision === "selected"));
+  if (performance.now() > deadline) throw new Error("generation_retrieval_timeout");
   return {
     status: prepared ? "injected" : "abstained",
     context: prepared?.text ?? null,
-    candidates: ranked.map((candidate) => ({ ...candidate, injected: injected.has(candidate.chunkId) })),
-    embeddingLatencyMs,
-    searchLatencyMs,
+    candidates: reranked.map((candidate) => ({
+      chunkId: candidate.chunkId,
+      rank: candidate.rank,
+      score: candidate.score,
+      injected: candidate.selectionDecision === "selected",
+      selectionRank: candidate.selectionRank,
+      selectionDecision: candidate.selectionDecision
+    })),
+    embeddingLatencyMs: timings.embeddingLatencyMs,
+    searchLatencyMs: timings.searchLatencyMs,
     totalLatencyMs: Math.max(0, Math.round(performance.now() - started)),
     retrievalTokens: prepared?.tokenCount ?? 0,
     errorCode: null
@@ -129,50 +177,51 @@ async function runRetrieval(input: GenerationRetrievalInput, started: number): P
 
 async function loadCandidateSources(
   input: GenerationRetrievalInput,
-  ranked: Array<{ chunkId: string; rank: number; score: number }>
+  ranked: RankedChunk[]
 ): Promise<GenerationCandidate[]> {
   if (!ranked.length || !supabaseAdmin) return [];
-  const { data: chunks, error: chunkError } = await supabaseAdmin.from("retrieval_chunks")
-    .select("id,start_sequence,end_sequence")
-    .eq("user_id", input.userId)
-    .eq("conversation_id", input.conversationId)
-    .in("id", ranked.map((candidate) => candidate.chunkId));
-  if (chunkError) throw new Error("generation_source_failed");
-  const byId = new Map((chunks ?? []).map((chunk: any) => [chunk.id as string, chunk]));
-  const ranges = (chunks ?? []).map((chunk: any) =>
-    `and(message_sequence.gte.${Number(chunk.start_sequence)},message_sequence.lte.${Number(chunk.end_sequence)})`
+  const ranges = ranked.map((candidate) =>
+    `and(message_sequence.gte.${candidate.startSequence},message_sequence.lte.${candidate.endSequence})`
   );
   if (!ranges.length) return [];
-  const { data: messages, error: messageError } = await supabaseAdmin.from("messages")
-    .select("id,message_sequence,role,content,image_present,crisis_detected")
-    .eq("conversation_id", input.conversationId)
-    .or(ranges.join(","))
-    .order("message_sequence", { ascending: true });
+  let sourceResult;
+  try {
+    sourceResult = await supabaseAdmin.from("messages")
+      .select("id,message_sequence,role,content,image_present,crisis_detected")
+      .eq("conversation_id", input.conversationId)
+      .or(ranges.join(","))
+      .order("message_sequence", { ascending: true });
+  } catch {
+    throw new Error("generation_source_failed");
+  }
+  const { data: messages, error: messageError } = sourceResult;
   if (messageError) throw new Error("generation_source_failed");
-  return ranked.flatMap((candidate) => {
-    const chunk = byId.get(candidate.chunkId);
-    if (!chunk) return [];
-    const startSequence = Number(chunk.start_sequence);
-    const endSequence = Number(chunk.end_sequence);
+  return ranked.map((candidate) => {
+    const startSequence = candidate.startSequence;
+    const endSequence = candidate.endSequence;
     const sourceRows = (messages ?? [])
       .filter((message: any) => Number(message.message_sequence) >= startSequence && Number(message.message_sequence) <= endSequence);
-    if (
-      sourceRows.length !== 3 ||
-      sourceRows.map((message: any) => message.role).join(",") !== "user,assistant,user" ||
-      sourceRows.some((message: any) => message.image_present || message.crisis_detected)
-    ) return [];
-    return [{
+    if (!isValidGenerationSourceWindow(sourceRows)) return { ...candidate, source: [] };
+    return {
       ...candidate,
-      startSequence,
-      endSequence,
       source: sourceRows.map((message: any) => ({
           id: message.id,
           sequence: Number(message.message_sequence),
           role: message.role,
           content: message.content
         }))
-    }];
+    };
   });
+}
+
+export function isValidGenerationSourceWindow(sourceRows: Array<{
+  role: string;
+  image_present?: boolean;
+  crisis_detected?: boolean;
+}>) {
+  return sourceRows.length === 3
+    && sourceRows.map((message) => message.role).join(",") === "user,assistant,user"
+    && sourceRows.every((message) => !message.image_present && !message.crisis_detected);
 }
 
 export async function recordGenerationRun(input: GenerationRunRecord) {
@@ -224,13 +273,15 @@ function emptyResult(started: number): GenerationRetrievalResult {
   };
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+export async function withDeadline<T>(promise: PromiseLike<T>, deadline: number, errorCode: string) {
   let timeout: NodeJS.Timeout | undefined;
   try {
+    const remainingMs = Math.max(0, deadline - performance.now());
+    if (remainingMs === 0) throw new Error(errorCode);
     return await Promise.race([
       promise,
       new Promise<T>((_resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error("generation_retrieval_timeout")), timeoutMs);
+        timeout = setTimeout(() => reject(new Error(errorCode)), remainingMs);
       })
     ]);
   } finally {
@@ -238,6 +289,18 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
   }
 }
 
+type RankedChunk = {
+  chunkId: string;
+  rank: number;
+  score: number;
+  startSequence: number;
+  endSequence: number;
+};
+
 function vector(values: number[]) {
   return `[${values.join(",")}]`;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "";
 }
