@@ -9,8 +9,8 @@ SoftPlace 是一個私人的 AI 情緒陪伴 App。核心角色「安放」提�
 - Mobile：Expo React Native、TypeScript、Supabase Auth
 - API：Node.js 24、Express、TypeScript
 - Data：Supabase Postgres、RLS、RPC、Vault、Cron
-- AI：OpenAI Responses API
-- Deploy：GitHub private repository、Zeabur
+- AI：OpenAI Responses API、Embeddings API
+- Deploy：GitHub repository、Zeabur
 - Email：Resend SMTP、Supabase Passwordless Email OTP
 
 ## Monorepo
@@ -19,7 +19,7 @@ SoftPlace 是一個私人的 AI 情緒陪伴 App。核心角色「安放」提�
 apps/mobile/               Expo App
 apps/server/               Express API、OpenAI 與 Worker
 packages/shared/           Mobile／Server 共用型別
-supabase/migrations/       001～010 資料庫 migration
+supabase/migrations/       001～016 資料庫 migration
 docs/                      產品、架構、狀態、維運與決策文件
 zbpack.json                Zeabur build／start 設定
 ```
@@ -36,7 +36,7 @@ cp apps/server/.env.example apps/server/.env
 cp apps/mobile/.env.example apps/mobile/.env
 ```
 
-在 Supabase SQL Editor 依序執行 `supabase/migrations/001_*.sql` 到 `010_*.sql`。把實際 credential 填入兩份 `.env`；OpenAI key 與 Supabase service-role key 只能放在 server，不能放進 mobile。
+在 Supabase SQL Editor 依序執行 `supabase/migrations/001_*.sql` 到 `016_*.sql`。已執行的 migration 不回頭改寫；後續修正一律追加新編號。把實際 credential 填入兩份 `.env`；OpenAI key 與 Supabase service-role key 只能放在 server，不能放進 mobile。
 
 ## 啟動
 
@@ -67,7 +67,7 @@ npm test
 npm run build:server
 ```
 
-Retrieval／RAG 的虛構繁中離線評估需另外手動執行，不會進入一般測試或正式聊天：
+Retrieval／RAG 的虛構繁中離線評估需另外手動執行；這套離線工具不會進入一般測試或正式聊天。Runtime 的 Deep allowlist Canary 是另一條獨立流程：
 
 ```bash
 npm run eval:retrieval
@@ -79,6 +79,7 @@ Retrieval Shadow mode 的回填、人工檢閱與脫敏報告為管理指令，�
 
 ```bash
 npm run retrieval:shadow:backfill -- --user-id=<uuid>
+npm run retrieval:evidence:backfill -- --user-id=<uuid>
 npm run retrieval:shadow:review -- --user-id=<uuid> --limit=25
 npm run retrieval:shadow:report
 npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
@@ -101,7 +102,7 @@ curl https://softplace.zeabur.app/health
 - 安放深度模式：`gpt-5.4-mini`
 - Ava：`gpt-5.4-mini`
 
-模型名稱由 server 環境變數控制。OpenAI Responses 預設 `store:false`；安放每次只送最近 10 則訊息與已確認記憶。Deep allowlist Canary 可從 Top 20 舊對話中以本機 evidence 規則選出最多 5 個 user-only 候選，合計不超過 1,200 tokens。
+模型名稱由 server 環境變數控制。OpenAI Responses 預設 `store:false`；安放每次只送最近 10 則訊息與已確認記憶。Deep allowlist Canary 以 user-only evidence 搜尋 Top 20，再套用 `max(0.40, best score × 0.90)`、重疊與安全過濾，最多注入 5 個候選，合計不超過 1,200 tokens。
 
 ## 文件索引
 

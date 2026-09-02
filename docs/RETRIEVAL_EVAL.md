@@ -1,6 +1,6 @@
 # Retrieval 離線評估
 
-這套工具只用於評估「安放是否能從較舊對話找回適當片段」。它不連接正式聊天 prompt、不讀取 Supabase，也不代表 production RAG 已啟用。
+這套離線工具只用於評估「安放是否能從較舊對話找回適當片段」。它不連接正式聊天 prompt、也不讀取 Supabase；後半部另行記錄的 Deep allowlist Generation Canary 是獨立 runtime，不代表 Retrieval 已對一般使用者開放。
 
 ## 資料集
 
@@ -82,7 +82,9 @@ artifacts/retrieval-eval/reports/<timestamp>/report.md
 
 完整 v1 JSON／Markdown 報告保留在 gitignored `artifacts/retrieval-shadow/2026-08-14T08-17-10-107Z/`，不進版控。Phase 1.5 起，搜尋會排除與實際 recent user context 時間範圍重疊的 chunks；v1 基線不重算、不覆寫，也不和修正後的新 runs 直接混合比較。
 
-## Phase 2 Deep Generation Canary
+## Phase 2 原始 Deep Generation Canary 基線
+
+以下保留最初 `threshold_top2` 行為供追溯；目前 Canary 已演進至 Phase 2.4.1，現行參數以後續段落與 `ARCHITECTURE.md` 為準。
 
 - 所有安放生成只使用最近 10 則；Deep allowlist 才同步執行 generation retrieval。
 - Phase 2 原始基線搜尋 Top 5、threshold `0.60`，最多注入 2 個 chunks；歷史 rows 標記為 `threshold_top2`。
@@ -109,9 +111,9 @@ artifacts/retrieval-eval/reports/<timestamp>/report.md
 - Phase 2.2 真實固定測試未通過：哭泣地點正確；貓咪正解雖在 Top 20，卻因 dialogue embedding 與 user-only 注入不一致落在 Rank 19 而未選；第一次出國則在 2.5 秒的 embedding 階段 timeout。這三筆保留為不可覆寫的失敗基線。
 - Phase 2.3 `user_evidence_top20` 為每個 logical chunk 增加 user-only evidence embedding，Generation 直接用它搜尋並注入同一批 user 原話；Shadow dialogue 基線不變。既有 chunks 需先回填，未有 evidence embedding 的資料不會進入新策略候選。
 - Phase 2.3 實測讓「飽飽／中國武漢／旅遊巴士哭泣」全部升至 Rank 1，證明搜尋表示已對齊；但每筆固定注入五個 chunks，也把其他兩個測試 facts 與弱內容一起送入 prompt。相鄰 chunks 去除共享 message 後，剩餘半段還會錯誤繼承原 chunk 分數。
-- Phase 2.4 `user_evidence_adaptive` 只選分數至少 `max(0.45, best evidence score × 0.90)` 的候選；與較高順位已選窗口共享任何 evidence message 時整個標為 duplicate，不再保留半段。Evidence embedding 與注入共用同一分類器，純探問／低資訊窗口沒有 evidence 向量，混合窗口只嵌入真正可注入的 user 事實；既有向量須以 `--refresh` 重算。三筆 production 排名離線重播都只留下正確 Rank 1。
+- Phase 2.4 `user_evidence_adaptive` 原採 `max(0.45, best evidence score × 0.90)`；實測貓咪與武漢成功，哭泣正確 Rank 1／`0.4300` 被固定門檻擋下，固定案例為 2／3。Phase 2.4.1 將最低門檻調為 `0.40`，相對門檻、重疊窗口排除與 evidence／注入共用分類器均不變；三組最新 production 分數回播皆只選正確 Rank 1。
 - 每個候選保存原始 rank／score、selection rank 與固定 decision；Review 只要求標註實際 injected candidates，但會顯示完整候選池與排除原因。Report 與舊 `threshold_top2`／`top5_all` 完全分開。
-- Phase 2.2 已因固定案例與 timeout gate 失敗，Phase 2.3 則因過度注入只保留為 recall 基線。Phase 2.4 需重新人工確認三個固定案例、完成 10 個 `user_evidence_adaptive` reviewed injected runs、helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0；程式完成不代表 Canary 已通過。
+- Phase 2.2 已因固定案例與 timeout gate 失敗，Phase 2.3 則因過度注入只保留為 recall 基線。Phase 2.4.1 需重新人工確認三個固定正例、no-recall 與模糊回指，並完成 10 個 `user_evidence_adaptive` reviewed injected runs；helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0。0.45／0.40 沿用同一 strategy，需依部署時間區分，程式完成不代表 Canary 已通過。
 
 ## 修改資料集
 

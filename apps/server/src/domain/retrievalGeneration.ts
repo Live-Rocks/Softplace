@@ -10,7 +10,7 @@ export const RETRIEVAL_GENERATION = {
   candidateLimit: 20,
   injectionLimit: 5,
   selectionStrategy: "user_evidence_adaptive",
-  minimumScore: 0.45,
+  minimumScore: 0.4,
   relativeScoreRatio: 0.9,
   tokenBudget: 1200,
   timeoutMs: 2500,

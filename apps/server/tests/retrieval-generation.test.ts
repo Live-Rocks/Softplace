@@ -36,7 +36,7 @@ test("generation constants use adaptive user-only evidence search with a 2.5 sec
   assert.equal(RETRIEVAL_GENERATION.candidateLimit, 20);
   assert.equal(RETRIEVAL_GENERATION.injectionLimit, 5);
   assert.equal(RETRIEVAL_GENERATION.selectionStrategy, "user_evidence_adaptive");
-  assert.equal(RETRIEVAL_GENERATION.minimumScore, 0.45);
+  assert.equal(RETRIEVAL_GENERATION.minimumScore, 0.4);
   assert.equal(RETRIEVAL_GENERATION.relativeScoreRatio, 0.9);
   assert.equal(RETRIEVAL_GENERATION.timeoutMs, 2500);
 });
@@ -103,34 +103,60 @@ test("low-information filtering covers observed test and acknowledgement variant
   assert.equal(classifyGenerationMessage("太好了，我幫牠取名叫飽飽"), "evidence");
 });
 
-test("adaptive evidence selection reproduces the three live smoke rankings without filling weak candidates", () => {
+test("adaptive evidence selection reproduces the latest three live smoke rankings at the 0.40 floor", () => {
   const cat = rerankGenerationCandidates([
-    candidate("cat", 1, 0.6097, [message("cat-name", 1, "user", "我幫一隻貓取名叫飽飽"), message("cat-kind", 3, "user", "是虎斑流浪貓")]),
-    candidate("cat-overlap", 2, 0.3954, [message("cat-kind", 3, "user", "是虎斑流浪貓"), message("trip", 5, "user", "我第一次出國去了中國武漢")]),
-    candidate("weak", 3, 0.3441, [message("weak", 11, "user", "我其實也忘記原因了")])
+    candidate("cat", 1, 0.5588, [message("cat-name", 1, "user", "我幫一隻貓取名叫飽飽"), message("cat-kind", 3, "user", "是虎斑流浪貓")]),
+    candidate("cat-overlap", 2, 0.3989, [message("cat-kind", 3, "user", "是虎斑流浪貓"), message("trip", 5, "user", "我第一次出國去了中國武漢")]),
+    candidate("weak", 3, 0.3748, [message("reason", 11, "user", "我其實也忘記原因了"), message("ack", 13, "user", "嗯 是呀\n沒關係了")])
   ]);
   assert.deepEqual(cat.map((item) => item.selectionDecision), ["selected", "duplicate", "below_relevance"]);
   assert.match(prepareGenerationContext(cat.filter((item) => item.selectionDecision === "selected"))?.text ?? "", /飽飽|虎斑/);
 
   const trip = rerankGenerationCandidates([
-    candidate("trip", 1, 0.5693, [message("trip", 5, "user", "我第一次出國去了中國武漢"), message("returned", 7, "user", "回來了")]),
-    candidate("trip-overlap", 2, 0.5216, [message("cat-kind", 3, "user", "是虎斑流浪貓"), message("trip", 5, "user", "我第一次出國去了中國武漢")]),
-    candidate("weak", 3, 0.4846, [message("weak", 11, "user", "我其實也忘記原因了")])
+    candidate("trip", 1, 0.4781, [message("cat-kind", 3, "user", "是虎斑流浪貓"), message("trip", 5, "user", "我第一次出國去了中國武漢")]),
+    candidate("trip-overlap", 2, 0.4652, [message("trip", 5, "user", "我第一次出國去了中國武漢"), message("returned", 7, "user", "回來了")]),
+    candidate("weak", 3, 0.4003, [message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過"), message("reason", 11, "user", "我其實也忘記原因了")])
   ]);
   assert.deepEqual(trip.map((item) => item.selectionDecision), ["selected", "duplicate", "below_relevance"]);
   const tripContext = prepareGenerationContext(trip.filter((item) => item.selectionDecision === "selected"))?.text ?? "";
   assert.match(tripContext, /中國武漢/);
-  assert.doesNotMatch(tripContext, /回來了|虎斑|忘記原因/);
+  assert.match(tripContext, /虎斑/);
+  assert.doesNotMatch(tripContext, /回來了|哭過|忘記原因/);
 
   const crying = rerankGenerationCandidates([
-    candidate("cry", 1, 0.5332, [message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過"), message("reason", 11, "user", "我其實也忘記原因了")]),
-    candidate("cry-overlap", 2, 0.5288, [message("returned", 7, "user", "回來了"), message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過")]),
-    candidate("trip", 3, 0.396, [message("trip", 5, "user", "我第一次出國去了中國武漢")])
+    candidate("cry", 1, 0.43, [message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過"), message("reason", 11, "user", "我其實也忘記原因了")]),
+    candidate("reason-overlap", 2, 0.4097, [message("reason", 11, "user", "我其實也忘記原因了"), message("ack", 13, "user", "嗯 是呀\n沒關係了")]),
+    candidate("cry-overlap", 3, 0.3853, [message("returned", 7, "user", "回來了"), message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過")]),
+    candidate("unrelated", 4, 0.3271, [message("cat-name", 1, "user", "我幫一隻貓取名叫飽飽"), message("cat-kind", 3, "user", "是虎斑流浪貓")])
   ]);
-  assert.deepEqual(crying.map((item) => item.selectionDecision), ["selected", "duplicate", "below_relevance"]);
+  assert.deepEqual(crying.map((item) => item.selectionDecision), ["selected", "duplicate", "duplicate", "below_relevance"]);
   const cryContext = prepareGenerationContext(crying.filter((item) => item.selectionDecision === "selected"))?.text ?? "";
   assert.match(cryContext, /旅遊巴士|下雨的窗外|忘記原因/);
-  assert.doesNotMatch(cryContext, /回來了|中國武漢/);
+  assert.doesNotMatch(cryContext, /回來了|飽飽|虎斑/);
+});
+
+test("adaptive evidence 0.40 floor keeps boundary evidence and abstains on weak or ambiguous candidates", () => {
+  const boundary = rerankGenerationCandidates([
+    candidate("boundary", 1, 0.4, [message("fact", 1, "user", "我把票放在藍色盒子裡")])
+  ]);
+  assert.equal(boundary[0]?.selectionDecision, "selected");
+
+  const weak = rerankGenerationCandidates([
+    candidate("weak-fact", 1, 0.3999, [message("weak-fact", 1, "user", "今天晚餐想吃麵")]),
+    candidate("ambiguous", 2, 0.39, [message("ambiguous", 3, "user", "又來了")]),
+    candidate("probe", 3, 0.8, [message("probe", 5, "user", "你記得我養的狗叫什麼嗎？")]),
+    candidate("assistant-only", 4, 0.9, [message("assistant", 7, "assistant", "舊助理猜測")])
+  ]);
+  assert.deepEqual(weak.map((item) => item.selectionDecision), [
+    "below_relevance", "below_relevance", "recall_probe_only", "invalid_source"
+  ]);
+  assert.equal(weak.some((item) => item.selectionDecision === "selected"), false);
+
+  const relative = rerankGenerationCandidates([
+    candidate("best", 1, 0.8, [message("best", 1, "user", "我最喜歡深綠色")]),
+    candidate("too-far", 2, 0.7199, [message("too-far", 3, "user", "我常穿灰色外套")])
+  ]);
+  assert.deepEqual(relative.map((item) => item.selectionDecision), ["selected", "below_relevance"]);
 });
 
 test("local evidence rerank selects at most five and marks later qualified candidates", () => {

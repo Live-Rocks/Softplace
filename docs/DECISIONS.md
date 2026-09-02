@@ -21,10 +21,11 @@
 ## ADR-003：單一時間線與最近 20 則上下文
 
 - 日期：2026-07-09
-- 狀態：Accepted
+- 狀態：Accepted；上下文數量已由 ADR-014 部分取代
 - 背景：MVP 需要連續感，但不應每次把全部歷史塞給模型，也尚未證明摘要或 RAG 的必要性。
 - 決定：每位使用者維持一條安放時間線；UI 可分頁載入完整歷史，OpenAI 每次只收到最近 20 則與已確認記憶。
 - 影響：成本與上下文大小可控；很長以前的具體細節可能無法被回想。摘要、embedding 與 RAG 延後到實測出現明確需求。
+- 後續（2026-08-14）：單一時間線仍保留；模型短期上下文已由 20 則改為 10 則，Deep allowlist 另以 Retrieval 補充較舊脈絡，見 ADR-014～018。
 
 ## ADR-004：輕量與深度是注意力深度，不是溫度高低
 
@@ -98,6 +99,7 @@
 - 背景：一般聊天會在同一個資料庫 transaction 內寫入 user 與 assistant 訊息，兩者可能取得相同 `created_at`；以 UUID 作同時間排序會造成重開後順序不穩定。
 - 決定：`messages` 由資料庫 trigger 分配每個 conversation 內連續的 `message_sequence`；歷史讀取、分頁 cursor 與模型最近 20 則上下文均以此排序。既有訊息維持 legacy 序號 `0`，不回填或重排。
 - 影響：新訊息的因果順序可被保證；舊歷史保留原貌，測試資料可透過清除對話建立新的正確時間線。
+- 後續（2026-08-14）：排序設計不變；模型讀取上限已由 ADR-014 改為最近 10 則。
 
 ## ADR-013：登入不設定年齡門檻
 
@@ -110,10 +112,11 @@
 ## ADR-014：最近 10 則作短期上下文，Deep Canary 以 RAG 補充舊脈絡
 
 - 日期：2026-08-14
-- 狀態：Accepted
+- 狀態：Accepted；10 則上下文仍有效，Retrieval 選擇已由 ADR-015～018 演進
 - 背景：最近 20 則能維持連續感，但加入 retrieval 後若仍完整保留會增加 token 與重複內容；Shadow 基線已證明部分較舊片段可被找回，但尚未證明直接注入的生成品質。
 - 決定：ADR-003 的模型上下文數量由 20 改為 10 則，Light 與 Deep 都適用。只有 Deep allowlist canary 在同步搜尋成功時，額外注入最多 2 個 threshold `0.60` 的 user-only 舊片段；搜尋仍使用 dialogue window。Generation 有獨立 kill switch，沿用 Shadow UUID allowlist。
 - 影響：短期上下文成本下降，Light／Deep 的上下文能力更明確分流；Deep 增加最多 2 秒 retrieval 等待與錯誤召回風險，因此必須 fail-open、保留人工雙層檢閱，且通過 25 個注入回覆前不得擴大。
+- 後續（2026-09-02）：最近 10 則與 kill switch 保留；Top 2／`0.60`／2 秒只屬原始 Phase 2 基線，現行 Canary 已演進為 Top 20 user evidence、2.5 秒與 adaptive cutoff。
 
 ## ADR-015：Deep Canary 將 Top 5 user-only 候選交給同一次生成判斷
 
@@ -134,7 +137,7 @@
 ## ADR-017：Generation 改用 User-only Evidence Embedding
 
 - 日期：2026-09-01
-- 狀態：Accepted，待 Canary 實測
+- 狀態：Accepted；Phase 2.3 Canary 已完成召回驗證
 - 背景：Phase 2.2 實測中，貓咪名字的正確 user 原話「飽飽」已被 Top 20 找到但位於 Rank 19；前方一個 chunk 主要因舊 assistant 回覆提及答案而取得較高 dialogue 相似度，實際注入卻只能送出不含答案的 user 原話。規則過濾能刪除探問與低資訊文字，但不能修正搜尋表示和注入證據不一致。
 - 決定：同一 logical chunk 額外保存只串接兩則安全 user 原話的 512 維 evidence embedding。Shadow 保留既有 dialogue 搜尋以延續基線；Generation 改以 evidence embedding 搜尋 Top 20，仍套用既有探問、低資訊、重複與安全過濾，最多注入五個 user-only 候選。不增加同步模型呼叫。
 - 影響：既有 chunks 必須受控回填 evidence embedding；未回填的 chunk 不參與新搜尋。新結果記為 `user_evidence_top20`，不得與失敗的 `top20_local_rerank` 基線混算。這能讓搜尋文字與注入文字一致，但仍需固定案例及人工檢閱驗證排序品質，不能只因清空測試對話後成功就宣稱污染問題已解決。
@@ -142,7 +145,13 @@
 ## ADR-018：Adaptive Evidence Cutoff 與整個重疊窗口排除
 
 - 日期：2026-09-02
-- 狀態：Accepted，待 Canary 實測
+- 狀態：Accepted；Phase 2.4 固定案例 2／3，Phase 2.4.1 待部署實測
 - 背景：Phase 2.3 的三個固定事實都升到 Rank 1，貓咪與哭泣回答正確，retrieval 為 482～529 ms；但固定補滿五個仍注入武漢、貓咪、哭泣與求職等互不相關內容。相鄰窗口共用一則 user message 時，舊邏輯只移除重複訊息，讓另一個無關半段繼承整個 chunk 的高相似度。
 - 決定：在不增加模型呼叫的前提下，候選必須同時達到固定最低分 `0.45` 與當次最高合格 evidence 分數的 `90%`；任何 evidence message 與較高順位已選候選重疊時，整個候選標為 `duplicate`，不保留剩餘半段。另將「回來了／嗯是呀／沒關係了」納入低資訊過濾。Evidence embedding 建立時也共用相同分類器：純記憶探問與低資訊 user 文字不進向量，混合窗口只嵌入實際可注入的 user 事實。
 - 影響：三個實測排名重播時都只留下正確 Rank 1；模糊回指若最高分低於 `0.45` 會安全 abstain。既有 evidence embeddings 必須用 `--refresh` 受控重算，純探問窗口會清為 null；舊 assistant 猜測仍可留在原始聊天及 Shadow dialogue 向量，但不會成為 Generation evidence。新結果記為 `user_evidence_adaptive`，Phase 2.3 保留為「召回正確但過度注入」基線；固定值仍須以新策略 runs 檢閱，不能視為 production threshold。
+
+### 2026-09-02 後續：Phase 2.4.1 最低門檻調為 0.40
+
+- Phase 2.4 實測貓咪與武漢成功，哭泣正確證據雖為 Rank 1，分數 `0.4300` 仍被固定最低 `0.45` 擋下，因此固定案例只通過 2／3。
+- 最低門檻調為 `0.40`，相對門檻仍為最高合格分數的 `90%`；以最新三組 production 分數重播時皆只選正確 Rank 1。此變更沿用 `user_evidence_adaptive`，不新增 migration，0.45／0.40 runs 只能依部署時間人工區分。
+- Selected chunk 仍可能包含一則無關的相鄰 user 事實；本階段不調整 chunk granularity，保留為後續 evidence concentration 改善項目。

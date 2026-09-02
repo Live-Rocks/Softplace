@@ -28,7 +28,7 @@
 | `SUPABASE_URL` | Supabase project URL | Server 設定 |
 | `SUPABASE_SERVICE_ROLE_KEY` | Auth 驗證與資料庫 privileged access | 秘密 |
 | `AI_PROVIDER` | `openai` 或明確本機測試用 `local` | Server 設定 |
-| `OPENAI_API_KEY` | OpenAI Responses API | 秘密 |
+| `OPENAI_API_KEY` | OpenAI Responses／Embeddings API | 秘密 |
 | `OPENAI_DEEP_MODEL` | 安放深度模型，預設 `gpt-5.4-mini` | Server 設定 |
 | `OPENAI_LIGHT_MODEL` | 安放輕量模型，預設 `gpt-4o-mini` | Server 設定 |
 | `OPENAI_LIFE_MODEL` | Ava 模型，預設 `gpt-5.4-mini` | Server 設定 |
@@ -65,6 +65,10 @@
 10. `010_message_sequence.sql`：安放訊息對話內流水號、原子分配 trigger 與可靠分頁排序。
 11. `011_retrieval_shadow.sql`：pgvector、512 維 dialogue-window chunks、shadow jobs/runs/candidates、RLS 與受控 RPC。
 12. `012_retrieval_generation_canary.sql`：Deep allowlist generation runs/candidates、雙層 review、token／latency 觀測、30 天清理與 service-role RPC。
+13. `013_retrieval_generation_top5.sql`：保留 Top 2 基線，新增 `top5_all` strategy 與 Top 5 candidate 記錄約束。
+14. `014_retrieval_generation_local_rerank.sql`：Generation Top 20 搜尋、selection rank／decision 與 `top20_local_rerank` 記錄。
+15. `015_retrieval_user_evidence.sql`：chunk evidence embedding、user-only Generation 搜尋與 `user_evidence_top20` 記錄。
+16. `016_retrieval_evidence_adaptive.sql`：`below_relevance` decision、`user_evidence_adaptive` 記錄 RPC 與既有 strategy 相容約束。
 
 已執行的 migration 不回頭改寫；修正以新編號追加。執行前先讀 SQL，執行後保存結果並跑對應 smoke test。
 
@@ -96,7 +100,7 @@ npm run start -- --host lan --clear
 
 ## Zeabur 部署
 
-GitHub private repository 的 `main` 已連接 Zeabur。`git push` 後 Zeabur 依根目錄 `zbpack.json` 執行：
+GitHub repository 的 `main` 已連接 Zeabur。`git push` 後 Zeabur 依根目錄 `zbpack.json` 執行：
 
 ```bash
 npm run build:server
@@ -124,7 +128,7 @@ curl -i https://softplace.zeabur.app/health
 
 修改 DNS、SMTP 或 template 後，以非管理員測試信箱走一次：寄碼、收信、輸入 OTP、建立 session、重開 App 保持登入。
 
-## Ava Worker、Vault 與 Cron
+## Companion Worker、Vault 與 Cron
 
 Zeabur 的 `COMPANION_WORKER_SECRET` 與 Supabase Vault 的 `companion_worker_secret` 必須完全相同。
 
@@ -140,8 +144,10 @@ curl -X POST "https://softplace.zeabur.app/internal/companion/tick" \
 空閒時預期：
 
 ```json
-{"scheduled":0,"claimed":0,"completed":0}
+{"scheduled":0,"claimed":0,"completed":0,"retrieval":{"claimed":0,"completed":0,"failed":0}}
 ```
+
+`retrieval` 統計與 Ava 獨立；只要 Shadow 開啟，同一 tick 即使 Ava 關閉仍會處理 Retrieval jobs 與 Generation retention cleanup。
 
 Supabase 啟用 Cron、`pg_net` 與 Vault。Cron job：
 
@@ -238,7 +244,7 @@ npm run retrieval:evidence:backfill -- --user-id=<uuid> --confirm
 6. 不清除原本受污染測試資料，依序重測貓咪名字、第一次出國地點與哭泣地點。Run 應為 `selection_strategy=user_evidence_top20`、`search_strategy=user_only`、`candidate_count<=20`、`injected_count<=5`。正確證據應進入實際注入，而非只存在於未選 Rank 6～20。
 7. Review 預設只處理 `user_evidence_top20`；完成 10 個 injected runs，沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。舊 `top20_local_rerank` 結果不得混算。
 
-新 Shadow jobs 會在同一次 embedding batch 建立 query、dialogue 與 user evidence 三個向量；Shadow 搜尋仍使用 dialogue 向量，Generation 才使用 evidence 向量。Migration 必須早於新 server 部署，否則 worker 尚找不到新的雙向量 upsert RPC。
+新 Shadow jobs 會在同一次 embedding batch 建立 query、dialogue，並在存在可注入 user 事實時建立 evidence 向量；純探問／低資訊窗口的 evidence 為 null。Shadow 搜尋仍使用 dialogue 向量，Generation 才使用 evidence 向量。Migration 必須早於新 server 部署，否則 worker 尚找不到新的雙向量 upsert RPC。
 
 ### Phase 2.4 Adaptive Evidence Selection
 
@@ -269,6 +275,17 @@ npm run retrieval:evidence:backfill -- --user-id=<uuid> --refresh --confirm
 6. 若任何正確 Rank 1 未注入、回答使用無關候選或出現敏感／過時內容，立即關閉 Generation。
 7. 完成 10 個新策略 injected runs 的 Review；沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。
 
+### Phase 2.4.1 Adaptive Cutoff 0.40
+
+Phase 2.4 的 0.45 Canary 中，貓咪與武漢正確注入，哭泣證據以 Rank 1／`0.4300` 被安全擋下，固定案例為 2／3。Phase 2.4.1 將 effective cutoff 改為 `max(0.40, best eligible evidence score × 0.90)`；strategy 仍為 `user_evidence_adaptive`，新舊 runs 需依部署時間人工區分。
+
+1. 設定 `RETRIEVAL_GENERATION_ENABLED=false` 並等待重啟。
+2. 部署 server；本次沒有 migration，也不需 refresh embeddings。
+3. 健康檢查通過後將 Generation 改回 `true`。
+4. 以兩則普通 user 訊息隔開每題，重測貓咪、武漢、哭泣；預期正確 Rank 1、`injected_count=1`、無錯誤。
+5. 另測一題 no-recall 與一題模糊回指，預期 `abstained`。若錯誤、敏感或過時證據被注入，立即關閉 Generation。
+6. 繼續完成 10 個 `user_evidence_adaptive` reviewed injected runs；報告會混合 0.45／0.40，判讀時必須以部署時間辨識本輪資料。
+
 ## Expo Go 與未來 Preview APK
 
 Expo Go 是開發容器，需從 Metro 下載 bundle；LAN 模式通常要求同一 Wi-Fi。Zeabur API 上線不會改變這件事。
@@ -283,7 +300,7 @@ Mobile 已安裝 `expo-notifications`／`expo-constants`，登入後會建立 `a
 2. Firebase project 已建立為 `SoftPlace`（project ID `softplace-f9042`），Gemini 與 Google Analytics 關閉；Android app 已註冊為 `SoftPlace Android`，package 是 `online.softplace.app`。`google-services.json` 已放在 `apps/mobile/`，並在 `app.json` 的 `expo.android.googleServicesFile` 指向 `./google-services.json`。
 3. Google Cloud／Firebase 的 FCM V1 service account JSON 已上傳並綁定 SoftPlace EAS project 的 `online.softplace.app`。這份本機檔案是秘密，不得放入 Git；若重新產生，仍須用 `npx eas-cli credentials --platform android` 更新 EAS credential。
 4. EAS `preview` environment 已建立 `EXPO_PUBLIC_API_BASE_URL`、`EXPO_PUBLIC_SUPABASE_URL`、`EXPO_PUBLIC_SUPABASE_ANON_KEY`。這三項會進入 APK，屬公開 Mobile 設定，不得誤放 service-role 或 OpenAI key。
-5. 執行 `npx eas-cli build --platform android --profile preview`，完成後從 EAS build 頁面的 install URL 在 Android 實機安裝 APK。2026-07-27 的首個成功 build 是 `81f8db28-51aa-4a0d-acfa-8f81bfc629f6`；本機副本為 `artifacts/softplace-preview-0.3.0.apk`（此目錄已由 Git 忽略）。
+5. 執行 `npx eas-cli build --platform android --profile preview`，完成後從 EAS build 頁面的 install URL 在 Android 實機安裝 APK。`eas.json` 使用 remote app version source，preview profile 會自動遞增 build number；目前 Expo manifest 顯示版本為 `0.3.1`。2026-07-27 的首個成功 build 是 `81f8db28-51aa-4a0d-acfa-8f81bfc629f6`；本機歷史副本為 `artifacts/softplace-preview-0.3.0.apk`（此目錄已由 Git 忽略）。
 6. 登入並允許通知。先用 Expo Push Notifications Tool 對新 token 做單則測試，再傳一則 Ava 訊息，等 Cron／Worker 完成後確認背景與關閉 App 狀態都能收到通知，點擊後進入 Ava。2026-07-27 首次 Android 實機驗收成功：設定顯示「Ava 推播：已註冊」，並收到包含 Ava 完整內文的第一則遠端推播。
 
 檢查資料與故障順序：`push_tokens` 是否有該帳號 enabled token → Worker log 是否出現 `[ava:push]` → Expo push ticket／receipt → EAS FCM V1 credential → Android App 通知權限與省電限制。目前 sender 已檢查 Expo HTTP 與逐 token push ticket；延遲 receipt 查詢與收到 `DeviceNotRegistered` 後自動停用 token 仍需補強。
@@ -300,13 +317,14 @@ Mobile 已安裝 `expo-notifications`／`expo-constants`，登入後會建立 `a
 6. 清除／重開 App 後聊天歷史正常。
 7. Ava user message 先 queued，Cron 到期後 completed，App 收到回覆。
 8. Ava proactive、quiet hours、未讀與 daily usage。
-9. Logs 不含聊天全文、base64、push token 或 secret。
+9. Retrieval Shadow／Generation flags、allowlist、fallback 與 Mobile response 隱私邊界。
+10. Logs 不含聊天全文、base64、push token 或 secret。
 
 ## Rollback
 
 1. 若是 server deploy 問題，先在 Zeabur 回退到上一個成功 Git deployment，或 revert 對應 commit 再 push。
 2. 若是新 feature，先用 env 關閉；Ava 可設 `AVA_FEATURE_ENABLED=false`。
-3. 若 Worker 異常，停用 `ava-companion-tick` Cron，避免持續重試與成本。
+3. 若 Companion Worker 異常，停用 `ava-companion-tick` Cron，避免 Ava 與 Retrieval 持續重試及產生成本。
 4. 若 OpenAI 異常，保持 retry `0`；不要以 `AI_PROVIDER=local` 冒充正式 AI 回覆。
 5. Migration 原則上不回滾刪資料；以追加修復 migration 恢復相容性。
 6. Rollback 後重跑 `/health` 與最小 smoke test，再調查根因。

@@ -7,12 +7,12 @@ SoftPlace 是 npm workspaces monorepo。Mobile 只持有公開 Supabase 設定�
 | 元件 | 責任 |
 | --- | --- |
 | `apps/mobile` | Expo React Native UI、Passwordless Auth session、呼叫 API、畫面輪詢、Push Token 註冊與通知導頁 |
-| `apps/server` | Auth 驗證、業務規則、OpenAI、額度、危機攔截、Ava Worker |
+| `apps/server` | Auth 驗證、業務規則、OpenAI、額度、危機攔截、Ava／Retrieval Worker |
 | `packages/shared` | Mobile／Server 共用 request、response 與 domain 型別 |
 | Supabase Auth | Email OTP、access token、使用者身分 |
-| Supabase Postgres | 對話、記憶、額度、Ava 狀態與 job；RLS／RPC |
-| Supabase Vault／Cron | 保存 Worker secret、每分鐘觸發 Ava tick |
-| OpenAI | Responses API 生成安放與 Ava 回覆 |
+| Supabase Postgres | 對話、記憶、額度、Ava 與 Retrieval 狀態／job；RLS／RPC／pgvector |
+| Supabase Vault／Cron | 保存 Worker secret、每分鐘觸發 companion tick |
+| OpenAI | Responses API 生成安放／Ava 回覆；Embeddings API 建立 Retrieval 向量 |
 | Resend SMTP | 由 Supabase Auth 寄送 OTP Email |
 | Zeabur | 從 GitHub `main` 自動 build／deploy Express API |
 
@@ -61,9 +61,18 @@ sequenceDiagram
             S->>DB: reserve_deep_usage
         end
         S->>DB: 依對話流水號讀最近 10 則＋已確認記憶
-        S->>O: instructions、history、user input、可選圖片
+        opt Deep allowlist Generation Retrieval
+            S->>O: current query＋最近兩則 user context embedding
+            O-->>S: 512 維 query vector
+            S->>DB: 同 user／conversation／時間上界內 Top 20 user evidence
+            S->>S: adaptive cutoff、重疊與安全過濾
+        end
+        S->>O: instructions、history、可選 retrieval、user input／圖片
         O-->>S: assistant output
         S->>DB: complete_chat_success 原子保存、分配訊息順序與扣款
+        opt Shadow allowlist 純文字
+            S->>DB: enqueue retrieval shadow job
+        end
         S-->>M: ChatResponse
     end
 ```
@@ -115,7 +124,7 @@ sequenceDiagram
     S-->>M: 新訊息與 state
 ```
 
-Ava 生活以 `Asia/Taipei` 計算。分時作息仍由 server 程式決定；全域事件保存為 2～3 天的 `ava_event_runs` 與每日 phase，同一天對所有使用者相同。Worker 每天為該 phase 生成一份全域事件細節，失敗時回退固定骨架；這份背景會低調注入回覆與主動訊息，但不讀取或保存任何使用者私訊。完整分時表留在 server；OpenAI 只收到「訊息傳來時」、「目前」與精簡事件背景。Worker 每次最多 claim 1 個 job，lease 與 RPC 避免同一 job 被重複完成。
+Ava 生活以 `Asia/Taipei` 計算。分時作息仍由 server 程式決定；全域事件保存為 2～3 天的 `ava_event_runs` 與每日 phase，同一天對所有使用者相同。Worker 每天為該 phase 生成一份全域事件細節，失敗時回退固定骨架；這份背景會低調注入回覆與主動訊息，但不讀取或保存任何使用者私訊。完整分時表留在 server；OpenAI 只收到「訊息傳來時」、「目前」與精簡事件背景。Ava 每次 tick 最多 claim 1 個到期 job，lease 與 RPC 避免重複完成；同一 endpoint 也會獨立處理 Retrieval Shadow jobs，即使 Ava feature 關閉仍可運作。
 
 Mobile 已安裝通知套件，登入後會取得並向 Server 註冊 Expo Push Token；Server Worker 完成 Ava 回覆後會送出遠端推播，點擊通知可導向 Ava。Android Preview APK 已完成 token 註冊及背景／關閉 App 收訊的實機驗收；iOS 尚未納入這次驗收。Ava 頁面每 12 秒、App 其他分頁每 30 秒的輪詢仍保留，用於前景畫面與狀態同步，也作為推播未送達時的 fallback。
 
@@ -152,7 +161,7 @@ Ava：`companion_definitions`、`ava_event_runs`、`companion_daily_states`、`u
 
 Retrieval Shadow：`retrieval_chunks`、`retrieval_shadow_jobs`、`retrieval_shadow_runs`、`retrieval_shadow_candidates`。只允許 service-role；每個安全的 `user → assistant → user` logical chunk 保存 `dialogue_window` 向量與 message ID，不重複保存聊天全文；只有經 Generation 分類器判定為可注入 user 事實的文字才另存 evidence 向量，純探問／低資訊窗口為 null。Shadow 沿用 dialogue 向量做離線觀測；每分鐘 worker 非同步搜尋，結果不進 prompt 或 Mobile API。
 
-Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前以 user-only evidence 向量同步搜尋 Top 20，再排除純記憶探問與低資訊內容。Phase 2.4 只保留分數至少 `max(0.45, best_score × 0.90)` 的候選，且整個排除與較高順位已選 chunk 重疊的窗口，避免重疊後剩餘的無關半段繼承原始高分；最多五個 user-only 證據、總計 1,200 tokens。觀測資料以 `threshold_top2`／`top5_all`／`top20_local_rerank`／`user_evidence_top20`／`user_evidence_adaptive` 分版，只保存 ID、分數、選擇決策、延遲、token 與人工標籤，30 天後清除。
+Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前以 user-only evidence 向量同步搜尋 Top 20，再排除純記憶探問與低資訊內容。Phase 2.4.1 只保留分數至少 `max(0.40, best_score × 0.90)` 的候選，且整個排除與較高順位已選 chunk 重疊的窗口，避免重疊後剩餘的無關半段繼承原始高分；最多五個 user-only 證據、總計 1,200 tokens。觀測資料以 `threshold_top2`／`top5_all`／`top20_local_rerank`／`user_evidence_top20`／`user_evidence_adaptive` 分版，只保存 ID、分數、選擇決策、延遲、token 與人工標籤，30 天後清除；Phase 2.4 的 0.45 與 Phase 2.4.1 的 0.40 沿用同一 strategy，只能依部署時間人工區分。
 
 一般使用者可透過 RLS 讀取自己的核心資料；實際 App 寫入主要由 server 使用 service-role 完成。成本保護與 Ava 資料表不開放 anon／authenticated 直接存取，只允許 service-role 與受控 RPC。
 
