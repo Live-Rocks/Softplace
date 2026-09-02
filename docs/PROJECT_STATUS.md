@@ -53,7 +53,7 @@
 - **已部署、使用者實測中**：Retrieval Phase 2.1 與 migration `013` 已上線。首筆成功 `top5_all` run 注入 5／5 candidates、retrieval 使用 172 tokens／823 ms，並正確回答貓咪名字「飽飽」；另有一筆在 2,003 ms 觸發 `generation_retrieval_timeout` 並安全 fallback。已完成 1／25 個 runs 的人工檢閱，尚不足以宣稱 Phase 2.1 通過。
 - **使用者實測未通過**：Retrieval Phase 2.2 與 migration `014` 已部署。三筆固定測試中，「我在哪裡哭過」在 1,376 ms 正確；「貓咪名字」雖在 506 ms 完成，但正確 user 證據位於 Rank 19、前五名被較弱內容占滿；「第一次出國」在 embedding 階段達 2,500 ms timeout。此結果仍是有效失敗基線，不因清空測試聊天而重算。
 - **使用者實測完成、召回通過但選擇過寬**：Retrieval Phase 2.3、migration `015` 與舊 chunk evidence 回填已部署。貓咪、第一次出國與哭泣三個正確 facts 都由舊資料升到 Rank 1；貓咪與哭泣回覆已確認正確，三筆 retrieval latency 為 510／529／482 ms、均無 timeout。每筆仍固定注入五個 chunks，混入武漢、貓咪、哭泣、求職等無關內容，因此不可視為最終 selection 策略。
-- **程式已完成、待部署實測**：Retrieval Phase 2.4 新增最低 `0.45`＋最高合格分數 `90%` 的 adaptive cutoff，並整個排除與已選候選重疊的窗口；補充真實出現過的低資訊變形。新策略 `user_evidence_adaptive`、migration `016`、review/report 隔離與三筆 production 排名回播測試已加入，不新增模型呼叫。
+- **程式已完成、待部署實測**：Retrieval Phase 2.4 新增最低 `0.45`＋最高合格分數 `90%` 的 adaptive cutoff，並整個排除與已選候選重疊的窗口；補充真實出現過的低資訊變形。Evidence 建立與注入改用同一分類器，純記憶探問／低資訊窗口不再產生 Generation evidence，既有向量需以 `--refresh` 重算。新策略 `user_evidence_adaptive`、migration `016`、review/report 隔離與三筆 production 排名回播測試已加入，不新增模型呼叫。
 
 ### Ava beta
 
@@ -79,7 +79,7 @@
 
 ## 近期優先順序
 
-1. 關閉 Generation，先套用 migration `016` 再部署 Phase 2.4；重新開啟後重測三個固定案例，確認新策略只注入真正相關的 Rank 1，而非固定五個。
+1. Generation 維持關閉；先套用 migration `016`、部署 Phase 2.4，再以 `retrieval:evidence:backfill --refresh --confirm` 重算既有 evidence 向量。完成後重新開啟並重測三個固定案例，確認新策略只注入真正相關的 Rank 1，而非固定五個。
 2. 累積並檢閱 10 個 `user_evidence_adaptive` injected runs，確認 helpful、錯誤召回、abstention 與 timeout rate；所有舊策略基線不混算。
 4. 長時間實測 Ava 延遲回覆、主動訊息、未讀與跨日生活脈絡。
 5. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。

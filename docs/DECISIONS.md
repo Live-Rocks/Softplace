@@ -144,5 +144,5 @@
 - 日期：2026-09-02
 - 狀態：Accepted，待 Canary 實測
 - 背景：Phase 2.3 的三個固定事實都升到 Rank 1，貓咪與哭泣回答正確，retrieval 為 482～529 ms；但固定補滿五個仍注入武漢、貓咪、哭泣與求職等互不相關內容。相鄰窗口共用一則 user message 時，舊邏輯只移除重複訊息，讓另一個無關半段繼承整個 chunk 的高相似度。
-- 決定：在不增加模型呼叫的前提下，候選必須同時達到固定最低分 `0.45` 與當次最高合格 evidence 分數的 `90%`；任何 evidence message 與較高順位已選候選重疊時，整個候選標為 `duplicate`，不保留剩餘半段。另將「回來了／嗯是呀／沒關係了」納入低資訊過濾。
-- 影響：三個實測排名重播時都只留下正確 Rank 1；模糊回指若最高分低於 `0.45` 會安全 abstain。新結果記為 `user_evidence_adaptive`，Phase 2.3 保留為「召回正確但過度注入」基線；固定值仍須以新策略 runs 檢閱，不能視為 production threshold。
+- 決定：在不增加模型呼叫的前提下，候選必須同時達到固定最低分 `0.45` 與當次最高合格 evidence 分數的 `90%`；任何 evidence message 與較高順位已選候選重疊時，整個候選標為 `duplicate`，不保留剩餘半段。另將「回來了／嗯是呀／沒關係了」納入低資訊過濾。Evidence embedding 建立時也共用相同分類器：純記憶探問與低資訊 user 文字不進向量，混合窗口只嵌入實際可注入的 user 事實。
+- 影響：三個實測排名重播時都只留下正確 Rank 1；模糊回指若最高分低於 `0.45` 會安全 abstain。既有 evidence embeddings 必須用 `--refresh` 受控重算，純探問窗口會清為 null；舊 assistant 猜測仍可留在原始聊天及 Shadow dialogue 向量，但不會成為 Generation evidence。新結果記為 `user_evidence_adaptive`，Phase 2.3 保留為「召回正確但過度注入」基線；固定值仍須以新策略 runs 檢閱，不能視為 production threshold。

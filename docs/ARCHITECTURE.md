@@ -150,7 +150,7 @@ Mobile 已安裝通知套件，登入後會取得並向 Server 註冊 Expo Push 
 
 Ava：`companion_definitions`、`ava_event_runs`、`companion_daily_states`、`user_companions`、`companion_messages`、`companion_memories`、`companion_jobs`、`companion_daily_usage`、`push_tokens`。
 
-Retrieval Shadow：`retrieval_chunks`、`retrieval_shadow_jobs`、`retrieval_shadow_runs`、`retrieval_shadow_candidates`。只允許 service-role；每個安全的 `user → assistant → user` logical chunk 同時保存 `dialogue_window` 與 user-only evidence 兩組向量及 message ID，不重複保存聊天全文。Shadow 沿用 dialogue 向量做離線觀測；每分鐘 worker 非同步搜尋，結果不進 prompt 或 Mobile API。
+Retrieval Shadow：`retrieval_chunks`、`retrieval_shadow_jobs`、`retrieval_shadow_runs`、`retrieval_shadow_candidates`。只允許 service-role；每個安全的 `user → assistant → user` logical chunk 保存 `dialogue_window` 向量與 message ID，不重複保存聊天全文；只有經 Generation 分類器判定為可注入 user 事實的文字才另存 evidence 向量，純探問／低資訊窗口為 null。Shadow 沿用 dialogue 向量做離線觀測；每分鐘 worker 非同步搜尋，結果不進 prompt 或 Mobile API。
 
 Retrieval Generation Canary：`retrieval_generation_runs`、`retrieval_generation_candidates`。只允許 service-role；Deep allowlist 在生成前以 user-only evidence 向量同步搜尋 Top 20，再排除純記憶探問與低資訊內容。Phase 2.4 只保留分數至少 `max(0.45, best_score × 0.90)` 的候選，且整個排除與較高順位已選 chunk 重疊的窗口，避免重疊後剩餘的無關半段繼承原始高分；最多五個 user-only 證據、總計 1,200 tokens。觀測資料以 `threshold_top2`／`top5_all`／`top20_local_rerank`／`user_evidence_top20`／`user_evidence_adaptive` 分版，只保存 ID、分數、選擇決策、延遲、token 與人工標籤，30 天後清除。
 

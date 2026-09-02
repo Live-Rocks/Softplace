@@ -421,6 +421,8 @@ test("user evidence migration aligns generation search with injected user text a
   assert.match(sql, /search_strategy = 'user_only'/);
   assert.match(sql, /to service_role/g);
   assert.match(backfill, /\.is\("evidence_embedding", null\)/);
+  assert.match(backfill, /--refresh/);
+  assert.match(backfill, /p_evidence_embedding: embedding \? .* : null/);
   assert.match(backfill, /buildShadowUserEvidence/);
   assert.doesNotMatch(backfill, /console\.info\([^\n]*\.text/);
   assert.match(shadowBackfill, /upsert_retrieval_chunk_with_evidence/);

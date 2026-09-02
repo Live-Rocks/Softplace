@@ -7,20 +7,22 @@ import { buildShadowUserEvidence } from "../domain/retrievalShadow.js";
 import { createShadowEmbeddingProvider } from "../integrations/retrievalShadow.js";
 import { supabaseAdmin } from "../integrations/supabase.js";
 
-type EvidenceWindow = { chunkId: string; text: string };
+type EvidenceWindow = { chunkId: string; text: string | null };
 
 export async function main(argv = process.argv.slice(2)) {
   const userId = value(argv, "user-id");
   const confirm = argv.includes("--confirm");
+  const refresh = argv.includes("--refresh");
   if (!userId) throw new Error("--user-id is required");
   if (!config.retrievalShadowUserIds.has(userId)) throw new Error("user is not in RETRIEVAL_SHADOW_USER_IDS");
   if (!supabaseAdmin) throw new Error("Supabase configuration is required");
   const db = supabaseAdmin;
-  const { data: chunks, error: chunkError } = await db.from("retrieval_chunks")
+  let chunkQuery = db.from("retrieval_chunks")
     .select("id,conversation_id,anchor_message_id,start_sequence,end_sequence")
     .eq("user_id", userId)
-    .is("evidence_embedding", null)
     .order("end_sequence", { ascending: true });
+  if (!refresh) chunkQuery = chunkQuery.is("evidence_embedding", null);
+  const { data: chunks, error: chunkError } = await chunkQuery;
   if (chunkError) throw new Error("evidence_backfill_read_failed");
 
   const windows: EvidenceWindow[] = [];
@@ -39,19 +41,24 @@ export async function main(argv = process.argv.slice(2)) {
     const messages = (data ?? []).map(mapMessage);
     for (const chunk of conversationChunks) {
       const evidence = buildShadowUserEvidence(messages, chunk.anchor_message_id);
-      if (!evidence
-        || evidence.startSequence !== Number(chunk.start_sequence)
-        || evidence.endSequence !== Number(chunk.end_sequence)) {
+      if (evidence && (evidence.startSequence !== Number(chunk.start_sequence)
+        || evidence.endSequence !== Number(chunk.end_sequence))) {
         skipped += 1;
         continue;
       }
-      windows.push({ chunkId: chunk.id, text: evidence.text });
+      if (!evidence && !refresh) {
+        skipped += 1;
+        continue;
+      }
+      windows.push({ chunkId: chunk.id, text: evidence?.text ?? null });
     }
   }
 
   console.info("[retrieval-evidence:backfill]", {
-    mode: confirm ? "confirm" : "dry-run",
+    mode: `${refresh ? "refresh-" : ""}${confirm ? "confirm" : "dry-run"}`,
     eligible: windows.length,
+    embedded: windows.filter((window) => window.text).length,
+    cleared: windows.filter((window) => !window.text).length,
     skipped
   });
   if (!confirm || !windows.length) return { eligible: windows.length, skipped, written: 0 };
@@ -60,14 +67,15 @@ export async function main(argv = process.argv.slice(2)) {
   let written = 0;
   for (let offset = 0; offset < windows.length; offset += 64) {
     const batch = windows.slice(offset, offset + 64);
-    const embeddings = await provider.embed(batch.map((window) => window.text));
-    for (let index = 0; index < batch.length; index += 1) {
-      const window = batch[index]!;
-      const embedding = embeddings[index]!;
+    const texts = batch.flatMap((window) => window.text ? [window.text] : []);
+    const embeddings = texts.length ? await provider.embed(texts) : [];
+    let embeddingIndex = 0;
+    for (const window of batch) {
+      const embedding = window.text ? embeddings[embeddingIndex++]! : null;
       const { data: updated, error } = await db.rpc("set_retrieval_chunk_evidence_embedding", {
         p_user_id: userId,
         p_chunk_id: window.chunkId,
-        p_evidence_embedding: `[${embedding.join(",")}]`
+        p_evidence_embedding: embedding ? `[${embedding.join(",")}]` : null
       });
       if (error || updated !== true) throw new Error("evidence_backfill_write_failed");
       written += 1;

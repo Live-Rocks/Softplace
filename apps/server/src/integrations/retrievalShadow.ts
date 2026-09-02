@@ -22,7 +22,7 @@ export type RetrievalShadowStore = {
   match(job: RetrievalShadowJob, beforeSequence: number, embedding: number[]): Promise<RetrievalShadowCandidate[]>;
   complete(job: RetrievalShadowJob, token: string, queueDelayMs: number, searchLatencyMs: number, candidates: RetrievalShadowCandidate[]): Promise<void>;
   retry(jobId: string, token: string, errorCode: string): Promise<void>;
-  upsertChunk(job: RetrievalShadowJob, startSequence: number, endSequence: number, dialogueEmbedding: number[], evidenceEmbedding: number[]): Promise<void>;
+  upsertChunk(job: RetrievalShadowJob, startSequence: number, endSequence: number, dialogueEmbedding: number[], evidenceEmbedding: number[] | null): Promise<void>;
   cleanup(): Promise<void>;
 };
 
@@ -116,7 +116,7 @@ export function createSupabaseShadowStore(): RetrievalShadowStore | null {
         p_user_id: job.userId, p_conversation_id: job.conversationId,
         p_anchor_message_id: job.queryMessageId, p_start_sequence: startSequence,
         p_end_sequence: endSequence, p_dialogue_embedding: vector(dialogueEmbedding),
-        p_evidence_embedding: vector(evidenceEmbedding)
+        p_evidence_embedding: evidenceEmbedding ? vector(evidenceEmbedding) : null
       });
       if (error) throw new Error("shadow_chunk_failed");
     },
@@ -145,14 +145,16 @@ export async function processRetrievalShadowJobs(input: {
       const query = buildShadowQueryParts(messages, job.queryMessageId);
       const window = buildShadowDialogueWindow(messages, job.queryMessageId);
       const evidence = buildShadowUserEvidence(messages, job.queryMessageId);
-      const texts = window && evidence ? [query.text, window.text, evidence.text] : [query.text];
+      const texts = window
+        ? [query.text, window.text, ...(evidence ? [evidence.text] : [])]
+        : [query.text];
       const [queryEmbedding, chunkEmbedding, evidenceEmbedding] = await input.provider.embed(texts);
       if (!queryEmbedding) throw new Error("shadow_embedding_invalid");
       const searchStarted = now();
       const candidates = await input.store.match(job, query.searchBeforeSequence, queryEmbedding);
       const searchLatencyMs = Math.max(0, now() - searchStarted);
-      if (window && evidence && chunkEmbedding && evidenceEmbedding) {
-        await input.store.upsertChunk(job, window.startSequence, window.endSequence, chunkEmbedding, evidenceEmbedding);
+      if (window && chunkEmbedding) {
+        await input.store.upsertChunk(job, window.startSequence, window.endSequence, chunkEmbedding, evidenceEmbedding ?? null);
       }
       await input.store.complete(job, token, Math.max(0, processingStarted - Date.parse(job.createdAt)), searchLatencyMs, candidates);
       completed += 1;

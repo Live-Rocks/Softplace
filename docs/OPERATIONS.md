@@ -247,15 +247,27 @@ Phase 2.3 已證明三個固定 facts 都能排到 Rank 1，但固定注入五�
 - effective cutoff：`max(0.45, best eligible evidence score × 0.90)`。
 - 與較高順位已選 chunk 共用任何 evidence message：整個候選排除，不讓無關半段繼承高分。
 - 「回來了／嗯是呀／沒關係了」視為低資訊，不占注入名額。
+- Evidence embedding 與注入共用同一分類器；純記憶探問／低資訊窗口不建立 evidence 向量，混合窗口只嵌入可注入的 user 事實。
 
 部署順序：
 
 1. 設定 `RETRIEVAL_GENERATION_ENABLED=false` 並等待重啟；Shadow 保持開啟。
 2. Supabase 執行 `016_retrieval_evidence_adaptive.sql`。
-3. 部署新 server，確認 commit 及健康檢查後再將 Generation 改回 `true`。
-4. 三個固定案例各自先隔開兩則普通 user context 再詢問。Run 應為 `selection_strategy=user_evidence_adaptive`；依目前實測分數，預期 `injected_count=1`，其他高重疊候選為 `duplicate`、弱候選為 `below_relevance`。
-5. 若任何正確 Rank 1 未注入、回答使用無關候選或出現敏感／過時內容，立即關閉 Generation。
-6. 完成 10 個新策略 injected runs 的 Review；沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。
+3. 部署新 server並確認健康檢查。Generation 維持關閉，先預覽現有 chunks 的完整 refresh（不輸出全文）：
+
+```bash
+npm run retrieval:evidence:backfill -- --user-id=<uuid> --refresh
+```
+
+4. 確認數量後重算所有既有 evidence embeddings；純探問／低資訊窗口會被清為 null：
+
+```bash
+npm run retrieval:evidence:backfill -- --user-id=<uuid> --refresh --confirm
+```
+
+5. Refresh 完成後才將 Generation 改回 `true`。三個固定案例各自先隔開兩則普通 user context 再詢問。Run 應為 `selection_strategy=user_evidence_adaptive`；依目前實測分數，預期 `injected_count=1`，其他高重疊候選為 `duplicate`、弱候選為 `below_relevance`。
+6. 若任何正確 Rank 1 未注入、回答使用無關候選或出現敏感／過時內容，立即關閉 Generation。
+7. 完成 10 個新策略 injected runs 的 Review；沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。
 
 ## Expo Go 與未來 Preview APK
 

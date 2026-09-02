@@ -23,7 +23,7 @@ export async function main(argv = process.argv.slice(2)) {
     start: number;
     end: number;
     dialogueText: string;
-    evidenceText: string;
+    evidenceText: string | null;
   }> = [];
   let skipped = 0;
   for (const conversation of conversations ?? []) {
@@ -35,14 +35,14 @@ export async function main(argv = process.argv.slice(2)) {
     for (const message of messages.filter((item) => item.role === "user")) {
       const window = buildShadowDialogueWindow(messages, message.id);
       const evidence = buildShadowUserEvidence(messages, message.id);
-      if (!window || !evidence) { skipped += 1; continue; }
+      if (!window) { skipped += 1; continue; }
       windows.push({
         conversationId: conversation.id,
         anchorId: message.id,
         start: window.startSequence,
         end: window.endSequence,
         dialogueText: window.text,
-        evidenceText: evidence.text
+        evidenceText: evidence?.text ?? null
       });
     }
   }
@@ -53,16 +53,18 @@ export async function main(argv = process.argv.slice(2)) {
   let written = 0;
   for (let offset = 0; offset < windows.length; offset += 64) {
     const batch = windows.slice(offset, offset + 64);
-    const embeddings = await provider.embed(batch.flatMap((window) => [window.dialogueText, window.evidenceText]));
+    const texts = batch.flatMap((window) => [window.dialogueText, ...(window.evidenceText ? [window.evidenceText] : [])]);
+    const embeddings = await provider.embed(texts);
+    let embeddingIndex = 0;
     for (let index = 0; index < batch.length; index += 1) {
       const window = batch[index]!;
-      const dialogueEmbedding = embeddings[index * 2]!;
-      const evidenceEmbedding = embeddings[index * 2 + 1]!;
+      const dialogueEmbedding = embeddings[embeddingIndex++]!;
+      const evidenceEmbedding = window.evidenceText ? embeddings[embeddingIndex++]! : null;
       const { error } = await supabaseAdmin.rpc("upsert_retrieval_chunk_with_evidence", {
         p_user_id: userId, p_conversation_id: window.conversationId, p_anchor_message_id: window.anchorId,
         p_start_sequence: window.start, p_end_sequence: window.end,
         p_dialogue_embedding: `[${dialogueEmbedding.join(",")}]`,
-        p_evidence_embedding: `[${evidenceEmbedding.join(",")}]`
+        p_evidence_embedding: evidenceEmbedding ? `[${evidenceEmbedding.join(",")}]` : null
       });
       if (error) throw new Error("shadow_backfill_write_failed");
       written += 1;

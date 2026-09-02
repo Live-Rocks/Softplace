@@ -43,6 +43,26 @@ test("shadow builders reject image or crisis query and skip unsafe windows", () 
   assert.equal(buildShadowUserEvidence(unsafe, "u3"), null);
 });
 
+test("user evidence embedding uses the same recall-probe and boilerplate filters as injection", () => {
+  const mixed: Message[] = [
+    message("probe", 1, "user", "你還記得那隻貓叫什麼嗎？"),
+    message("answer", 2, "assistant", "牠叫咪咪"),
+    message("fact", 3, "user", "我幫牠取名叫飽飽")
+  ];
+  assert.deepEqual(buildShadowUserEvidence(mixed, "fact"), {
+    startSequence: 1,
+    endSequence: 3,
+    text: "我幫牠取名叫飽飽"
+  });
+
+  const noEvidence: Message[] = [
+    message("probe", 1, "user", "你還記得那隻貓叫什麼嗎？"),
+    message("answer", 2, "assistant", "牠叫咪咪"),
+    message("thanks", 3, "user", "謝謝")
+  ];
+  assert.equal(buildShadowUserEvidence(noEvidence, "thanks"), null);
+});
+
 test("review displays the exact embedding input, two context slots, and threshold state", () => {
   const mixed = [
     message("u0", 0, "user", "太早的內容"),
@@ -162,6 +182,38 @@ test("worker embeds query, dialogue, and user-only evidence, searches before sav
   ]);
   assert.deepEqual(order, ["match", "upsert", "complete", "cleanup"]);
   assert.equal(JSON.stringify(completed).includes("果然又來了"), false);
+});
+
+test("worker still stores a dialogue chunk but clears evidence when a window has no injectable user fact", async () => {
+  const noEvidence: Message[] = [
+    message("probe", 1, "user", "你還記得那隻貓叫什麼嗎？"),
+    message("answer", 2, "assistant", "牠叫咪咪"),
+    message("thanks", 3, "user", "謝謝")
+  ];
+  let embeddedTexts: string[] = [];
+  let storedEvidence: number[] | null | undefined;
+  const store: RetrievalShadowStore = {
+    async claimJobs() { return [{ id: "job", userId: "user", conversationId: "conversation", queryMessageId: "thanks", attempts: 1, createdAt: new Date().toISOString() }]; },
+    async getMessages() { return noEvidence; },
+    async match() { return []; },
+    async complete() {},
+    async retry() { throw new Error("unexpected retry"); },
+    async upsertChunk(_job, _start, _end, _dialogue, evidence) { storedEvidence = evidence; },
+    async cleanup() {}
+  };
+  const result = await processRetrievalShadowJobs({
+    store,
+    provider: {
+      async embed(texts) {
+        embeddedTexts = texts;
+        return texts.map((_, index) => index === 0 ? [1, 0] : [0, 1]);
+      }
+    }
+  });
+  assert.deepEqual(result, { claimed: 1, completed: 1, failed: 0 });
+  assert.equal(embeddedTexts.length, 2);
+  assert.match(embeddedTexts[1]!, /安放：牠叫咪咪/);
+  assert.equal(storedEvidence, null);
 });
 
 test("worker converts unknown provider errors to a fixed code", async () => {

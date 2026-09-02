@@ -1,4 +1,5 @@
 import type { Message } from "@softplace/shared";
+import { classifyGenerationMessage } from "./retrievalEvidence.js";
 
 export const RETRIEVAL_SHADOW = {
   model: "text-embedding-3-small",
@@ -62,10 +63,12 @@ export function buildShadowUserEvidence(messages: Message[], anchorMessageId: st
   const source = shadowWindowSource(messages, anchorMessageId);
   if (!source) return null;
   const [first, , anchor] = source;
+  const evidence = [first, anchor].filter((message) => classifyGenerationMessage(message.content) === "evidence");
+  if (!evidence.length) return null;
   return {
     startSequence: first.sequence,
     endSequence: anchor.sequence,
-    text: [first, anchor]
+    text: evidence
       .map((message) => truncate(message.content, RETRIEVAL_SHADOW.maxChunkMessageCharacters))
       .join("\n")
   };
