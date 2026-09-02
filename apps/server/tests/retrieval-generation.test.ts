@@ -32,10 +32,12 @@ test("generation query uses two recent eligible user messages and history cutoff
   assert.equal(generationSearchBeforeSequence([]), null);
 });
 
-test("generation constants use user-only evidence search with a 2.5 second deadline", () => {
+test("generation constants use adaptive user-only evidence search with a 2.5 second deadline", () => {
   assert.equal(RETRIEVAL_GENERATION.candidateLimit, 20);
   assert.equal(RETRIEVAL_GENERATION.injectionLimit, 5);
-  assert.equal(RETRIEVAL_GENERATION.selectionStrategy, "user_evidence_top20");
+  assert.equal(RETRIEVAL_GENERATION.selectionStrategy, "user_evidence_adaptive");
+  assert.equal(RETRIEVAL_GENERATION.minimumScore, 0.45);
+  assert.equal(RETRIEVAL_GENERATION.relativeScoreRatio, 0.9);
   assert.equal(RETRIEVAL_GENERATION.timeoutMs, 2500);
 });
 
@@ -96,7 +98,39 @@ test("low-information filtering covers observed test and acknowledgement variant
   assert.equal(classifyGenerationMessage("就測試😂"), "boilerplate");
   assert.equal(classifyGenerationMessage("嘻嘻好棒"), "boilerplate");
   assert.equal(classifyGenerationMessage("太好了，你記起來了"), "boilerplate");
+  assert.equal(classifyGenerationMessage("回來了"), "boilerplate");
+  assert.equal(classifyGenerationMessage("嗯 是呀\n沒關係了"), "boilerplate");
   assert.equal(classifyGenerationMessage("太好了，我幫牠取名叫飽飽"), "evidence");
+});
+
+test("adaptive evidence selection reproduces the three live smoke rankings without filling weak candidates", () => {
+  const cat = rerankGenerationCandidates([
+    candidate("cat", 1, 0.6097, [message("cat-name", 1, "user", "我幫一隻貓取名叫飽飽"), message("cat-kind", 3, "user", "是虎斑流浪貓")]),
+    candidate("cat-overlap", 2, 0.3954, [message("cat-kind", 3, "user", "是虎斑流浪貓"), message("trip", 5, "user", "我第一次出國去了中國武漢")]),
+    candidate("weak", 3, 0.3441, [message("weak", 11, "user", "我其實也忘記原因了")])
+  ]);
+  assert.deepEqual(cat.map((item) => item.selectionDecision), ["selected", "duplicate", "below_relevance"]);
+  assert.match(prepareGenerationContext(cat.filter((item) => item.selectionDecision === "selected"))?.text ?? "", /飽飽|虎斑/);
+
+  const trip = rerankGenerationCandidates([
+    candidate("trip", 1, 0.5693, [message("trip", 5, "user", "我第一次出國去了中國武漢"), message("returned", 7, "user", "回來了")]),
+    candidate("trip-overlap", 2, 0.5216, [message("cat-kind", 3, "user", "是虎斑流浪貓"), message("trip", 5, "user", "我第一次出國去了中國武漢")]),
+    candidate("weak", 3, 0.4846, [message("weak", 11, "user", "我其實也忘記原因了")])
+  ]);
+  assert.deepEqual(trip.map((item) => item.selectionDecision), ["selected", "duplicate", "below_relevance"]);
+  const tripContext = prepareGenerationContext(trip.filter((item) => item.selectionDecision === "selected"))?.text ?? "";
+  assert.match(tripContext, /中國武漢/);
+  assert.doesNotMatch(tripContext, /回來了|虎斑|忘記原因/);
+
+  const crying = rerankGenerationCandidates([
+    candidate("cry", 1, 0.5332, [message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過"), message("reason", 11, "user", "我其實也忘記原因了")]),
+    candidate("cry-overlap", 2, 0.5288, [message("returned", 7, "user", "回來了"), message("cry", 9, "user", "我在旅遊巴士上，看著下雨的窗外哭過")]),
+    candidate("trip", 3, 0.396, [message("trip", 5, "user", "我第一次出國去了中國武漢")])
+  ]);
+  assert.deepEqual(crying.map((item) => item.selectionDecision), ["selected", "duplicate", "below_relevance"]);
+  const cryContext = prepareGenerationContext(crying.filter((item) => item.selectionDecision === "selected"))?.text ?? "";
+  assert.match(cryContext, /旅遊巴士|下雨的窗外|忘記原因/);
+  assert.doesNotMatch(cryContext, /回來了|中國武漢/);
 });
 
 test("local evidence rerank selects at most five and marks later qualified candidates", () => {
@@ -271,6 +305,36 @@ test("phase 2.3 report isolates user evidence search from the failed dialogue-ra
   assert.deepEqual(report.top20LocalRerankRuns, { injected: 1, abstained: 0, fallback: 0 });
 });
 
+test("phase 2.4 report isolates adaptive evidence selection and below-relevance decisions", () => {
+  const adaptiveRuns = Array.from({ length: 10 }, (_, index) => ({
+    id: `adaptive-${index}`,
+    status: "injected" as const,
+    selection_strategy: "user_evidence_adaptive" as const,
+    injected_count: 1,
+    embedding_latency_ms: 300,
+    search_latency_ms: 100,
+    total_retrieval_latency_ms: 400,
+    history_10_tokens: 500,
+    history_20_tokens: 1200,
+    retrieval_tokens: 80,
+    actual_input_tokens: 1260,
+    output_tokens: 100,
+    response_effect: index < 5 ? "helpful" as const : "neutral" as const,
+    stale_detected: false,
+    sensitive_detected: false,
+    error_code: null
+  }));
+  const candidates = adaptiveRuns.flatMap((run) => [
+    { run_id: run.id, injected: true, selection_decision: "selected", review_label: "must" },
+    { run_id: run.id, injected: false, selection_decision: "below_relevance", review_label: null }
+  ]);
+  const report = buildGenerationReport(adaptiveRuns, candidates);
+  assert.equal(report.phase24.review.reviewedInjectedRuns, 10);
+  assert.equal(report.phase24.selectionDecisions.below_relevance, 10);
+  assert.equal(report.phase24.metricsPass, true);
+  assert.deepEqual(report.userEvidenceAdaptiveRuns, { injected: 10, abstained: 0, fallback: 0 });
+});
+
 test("generation errors are redacted to fixed codes", () => {
   assert.equal(retrievalGenerationErrorCode(new Error("generation_search_failed")), "generation_search_failed");
   assert.equal(retrievalGenerationErrorCode(new Error("generation_embedding_failed")), "generation_embedding_failed");
@@ -310,19 +374,31 @@ test("top five migration preserves the old strategy and records the new strategy
   assert.match(sql, /to service_role/);
 });
 
-test("top five recording, review, and reporting explicitly isolate the new strategy", async () => {
+test("generation recording, review, and reporting isolate the current adaptive strategy", async () => {
   const [integration, review, report] = await Promise.all([
     fs.readFile(new URL("../src/integrations/retrievalGeneration.ts", import.meta.url), "utf8"),
     fs.readFile(new URL("../src/scripts/retrievalGenerationReview.ts", import.meta.url), "utf8"),
     fs.readFile(new URL("../src/scripts/retrievalGenerationReport.ts", import.meta.url), "utf8")
   ]);
-  assert.match(integration, /p_selection_strategy: RETRIEVAL_GENERATION\.selectionStrategy/);
+  assert.match(integration, /rpc\("record_retrieval_generation_adaptive_run"/);
   assert.match(integration, /rpc\("match_retrieval_generation_evidence_chunks"/);
-  assert.match(review, /\.eq\("selection_strategy", "user_evidence_top20"\)/);
+  assert.match(review, /\.eq\("selection_strategy", "user_evidence_adaptive"\)/);
   assert.match(report, /run\.selection_strategy === "top5_all"/);
   assert.match(report, /run\.selection_strategy === "threshold_top2"/);
   assert.match(report, /run\.selection_strategy === "top20_local_rerank"/);
   assert.match(report, /run\.selection_strategy === "user_evidence_top20"/);
+  assert.match(report, /run\.selection_strategy === "user_evidence_adaptive"/);
+});
+
+test("adaptive evidence migration preserves old strategies and records relevance decisions separately", async () => {
+  const sql = await fs.readFile(new URL("../../../supabase/migrations/016_retrieval_evidence_adaptive.sql", import.meta.url), "utf8");
+  assert.match(sql, /selection_strategy in \('user_evidence_top20', 'user_evidence_adaptive'\)/);
+  assert.match(sql, /search_strategy = 'user_only'/);
+  assert.match(sql, /below_relevance/);
+  assert.match(sql, /record_retrieval_generation_adaptive_run/);
+  assert.match(sql, /c\.evidence_embedding is not null/);
+  assert.match(sql, /candidate_count|v_candidate_count/);
+  assert.match(sql, /to service_role/);
 });
 
 test("user evidence migration aligns generation search with injected user text and supports backfill", async () => {

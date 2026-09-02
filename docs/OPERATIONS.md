@@ -212,7 +212,7 @@ npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
 npm run retrieval:generation:report
 ```
 
-Phase 2.2 歷史檢閱以 `top20_local_rerank` 隔離保存；自 Phase 2.3 起 Review 預設改為 `user_evidence_top20`。工具在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。Report 依 strategy 分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
+舊策略檢閱結果依 strategy 隔離保存；Phase 2.4 起 Review 預設只處理 `user_evidence_adaptive`。工具在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。Report 依 strategy 分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
 
 ### Phase 2.3 User-only Evidence Search
 
@@ -239,6 +239,23 @@ npm run retrieval:evidence:backfill -- --user-id=<uuid> --confirm
 7. Review 預設只處理 `user_evidence_top20`；完成 10 個 injected runs，沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。舊 `top20_local_rerank` 結果不得混算。
 
 新 Shadow jobs 會在同一次 embedding batch 建立 query、dialogue 與 user evidence 三個向量；Shadow 搜尋仍使用 dialogue 向量，Generation 才使用 evidence 向量。Migration 必須早於新 server 部署，否則 worker 尚找不到新的雙向量 upsert RPC。
+
+### Phase 2.4 Adaptive Evidence Selection
+
+Phase 2.3 已證明三個固定 facts 都能排到 Rank 1，但固定注入五個造成明顯無關內容。Phase 2.4 不改 embedding 或 Top 20 搜尋，也不增加 API 呼叫；只在本機套用：
+
+- effective cutoff：`max(0.45, best eligible evidence score × 0.90)`。
+- 與較高順位已選 chunk 共用任何 evidence message：整個候選排除，不讓無關半段繼承高分。
+- 「回來了／嗯是呀／沒關係了」視為低資訊，不占注入名額。
+
+部署順序：
+
+1. 設定 `RETRIEVAL_GENERATION_ENABLED=false` 並等待重啟；Shadow 保持開啟。
+2. Supabase 執行 `016_retrieval_evidence_adaptive.sql`。
+3. 部署新 server，確認 commit 及健康檢查後再將 Generation 改回 `true`。
+4. 三個固定案例各自先隔開兩則普通 user context 再詢問。Run 應為 `selection_strategy=user_evidence_adaptive`；依目前實測分數，預期 `injected_count=1`，其他高重疊候選為 `duplicate`、弱候選為 `below_relevance`。
+5. 若任何正確 Rank 1 未注入、回答使用無關候選或出現敏感／過時內容，立即關閉 Generation。
+6. 完成 10 個新策略 injected runs 的 Review；沿用 helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0 的 gate。
 
 ## Expo Go 與未來 Preview APK
 

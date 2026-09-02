@@ -138,3 +138,11 @@
 - 背景：Phase 2.2 實測中，貓咪名字的正確 user 原話「飽飽」已被 Top 20 找到但位於 Rank 19；前方一個 chunk 主要因舊 assistant 回覆提及答案而取得較高 dialogue 相似度，實際注入卻只能送出不含答案的 user 原話。規則過濾能刪除探問與低資訊文字，但不能修正搜尋表示和注入證據不一致。
 - 決定：同一 logical chunk 額外保存只串接兩則安全 user 原話的 512 維 evidence embedding。Shadow 保留既有 dialogue 搜尋以延續基線；Generation 改以 evidence embedding 搜尋 Top 20，仍套用既有探問、低資訊、重複與安全過濾，最多注入五個 user-only 候選。不增加同步模型呼叫。
 - 影響：既有 chunks 必須受控回填 evidence embedding；未回填的 chunk 不參與新搜尋。新結果記為 `user_evidence_top20`，不得與失敗的 `top20_local_rerank` 基線混算。這能讓搜尋文字與注入文字一致，但仍需固定案例及人工檢閱驗證排序品質，不能只因清空測試對話後成功就宣稱污染問題已解決。
+
+## ADR-018：Adaptive Evidence Cutoff 與整個重疊窗口排除
+
+- 日期：2026-09-02
+- 狀態：Accepted，待 Canary 實測
+- 背景：Phase 2.3 的三個固定事實都升到 Rank 1，貓咪與哭泣回答正確，retrieval 為 482～529 ms；但固定補滿五個仍注入武漢、貓咪、哭泣與求職等互不相關內容。相鄰窗口共用一則 user message 時，舊邏輯只移除重複訊息，讓另一個無關半段繼承整個 chunk 的高相似度。
+- 決定：在不增加模型呼叫的前提下，候選必須同時達到固定最低分 `0.45` 與當次最高合格 evidence 分數的 `90%`；任何 evidence message 與較高順位已選候選重疊時，整個候選標為 `duplicate`，不保留剩餘半段。另將「回來了／嗯是呀／沒關係了」納入低資訊過濾。
+- 影響：三個實測排名重播時都只留下正確 Rank 1；模糊回指若最高分低於 `0.45` 會安全 abstain。新結果記為 `user_evidence_adaptive`，Phase 2.3 保留為「召回正確但過度注入」基線；固定值仍須以新策略 runs 檢閱，不能視為 production threshold。

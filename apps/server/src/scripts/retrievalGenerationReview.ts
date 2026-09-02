@@ -33,7 +33,7 @@ export async function main(argv = process.argv.slice(2)) {
       async loadPage(from, to) {
         const { data, error } = await db.from("retrieval_generation_runs")
           .select("id,query_message_id,assistant_message_id,response_effect,stale_detected,sensitive_detected,created_at")
-          .eq("user_id", userId).eq("status", "injected").eq("selection_strategy", "user_evidence_top20")
+          .eq("user_id", userId).eq("status", "injected").eq("selection_strategy", "user_evidence_adaptive")
           .order("created_at", { ascending: true }).range(from, to);
         if (error) throw new Error("generation_review_read_failed");
         return data ?? [];

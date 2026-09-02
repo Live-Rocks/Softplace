@@ -226,7 +226,7 @@ export function isValidGenerationSourceWindow(sourceRows: Array<{
 
 export async function recordGenerationRun(input: GenerationRunRecord) {
   if (!supabaseAdmin) return;
-  const { error } = await supabaseAdmin.rpc("record_retrieval_generation_run", {
+  const { error } = await supabaseAdmin.rpc("record_retrieval_generation_adaptive_run", {
     p_user_id: input.userId,
     p_conversation_id: input.conversationId,
     p_query_message_id: input.queryMessageId,
@@ -246,8 +246,7 @@ export async function recordGenerationRun(input: GenerationRunRecord) {
     p_actual_input_tokens: input.tokenMetrics.actualInputTokens,
     p_cached_input_tokens: input.tokenMetrics.cachedInputTokens,
     p_output_tokens: input.tokenMetrics.outputTokens,
-    p_candidates: input.retrieval.candidates,
-    p_selection_strategy: RETRIEVAL_GENERATION.selectionStrategy
+    p_candidates: input.retrieval.candidates
   });
   if (error) throw new Error("generation_observation_write_failed");
 }

@@ -7,7 +7,9 @@ export const RETRIEVAL_GENERATION = {
   baselineHistoryLimit: 20,
   candidateLimit: 20,
   injectionLimit: 5,
-  selectionStrategy: "user_evidence_top20",
+  selectionStrategy: "user_evidence_adaptive",
+  minimumScore: 0.45,
+  relativeScoreRatio: 0.9,
   tokenBudget: 1200,
   timeoutMs: 2500,
   retentionDays: 30
@@ -29,6 +31,7 @@ export type GenerationSelectionDecision =
   | "recall_probe_only"
   | "boilerplate_only"
   | "duplicate"
+  | "below_relevance"
   | "not_selected"
   | "invalid_source";
 
@@ -48,7 +51,10 @@ const BOILERPLATE = new Set(["好", "好呀", "好的", "嗯", "喔", "哦", "�
 const BOILERPLATE_PATTERNS = [
   /^(?:就)?測試(?:訊息)?$/u,
   /^(?:嘻嘻|哈哈|嘿嘿)?(?:好|好呀|好的|好棒|太好了|謝謝|知道了|了解了)$/u,
-  /^(?:太好了)?你記起來了$/u
+  /^(?:太好了)?你記起來了$/u,
+  /^(?:我)?回來了$/u,
+  /^(?:嗯)?是呀$/u,
+  /^沒關係了?$/u
 ] as const;
 const MEMORY_RECALL_PATTERNS = ["記得", "想得起", "有印象"] as const;
 const FACT_LOOKUP_PATTERNS = [
@@ -84,30 +90,38 @@ export function rerankGenerationCandidates(
   const seenIds = new Set<string>();
   const seenContent = new Set<string>();
   let selectionRank = 0;
-
-  return [...candidates].sort((left, right) => left.rank - right.rank).map((candidate) => {
+  const classified = [...candidates].sort((left, right) => left.rank - right.rank).map((candidate) => {
     const userMessages = candidate.source
       .filter((message) => message.role === "user")
       .sort((left, right) => left.sequence - right.sequence);
+    const evidence = userMessages.filter((message) => classifyGenerationMessage(message.content) === "evidence");
+    return { candidate, userMessages, evidence };
+  });
+  const bestEvidenceScore = Math.max(...classified.filter((item) => item.evidence.length).map((item) => item.candidate.score));
+  const effectiveThreshold = Number.isFinite(bestEvidenceScore)
+    ? Math.max(RETRIEVAL_GENERATION.minimumScore, bestEvidenceScore * RETRIEVAL_GENERATION.relativeScoreRatio)
+    : Number.POSITIVE_INFINITY;
+
+  return classified.map(({ candidate, userMessages, evidence }) => {
     if (!userMessages.length) return ranked(candidate, null, "invalid_source", []);
 
-    const evidence = userMessages.filter((message) => classifyGenerationMessage(message.content) === "evidence");
     if (!evidence.length) {
       const allBoilerplate = userMessages.every((message) => classifyGenerationMessage(message.content) === "boilerplate");
       return ranked(candidate, null, allBoilerplate ? "boilerplate_only" : "recall_probe_only", []);
     }
-
-    const uniqueEvidence = evidence.filter((message) => {
+    const overlapsSelected = evidence.some((message) => {
       const normalized = normalizeGenerationText(message.content);
-      if (seenIds.has(message.id) || seenContent.has(normalized)) return false;
-      seenIds.add(message.id);
-      seenContent.add(normalized);
-      return true;
+      return seenIds.has(message.id) || seenContent.has(normalized);
     });
-    if (!uniqueEvidence.length) return ranked(candidate, null, "duplicate", []);
-    if (selectionRank >= injectionLimit) return ranked(candidate, null, "not_selected", uniqueEvidence);
+    if (overlapsSelected) return ranked(candidate, null, "duplicate", []);
+    if (candidate.score < effectiveThreshold) return ranked(candidate, null, "below_relevance", evidence);
+    if (selectionRank >= injectionLimit) return ranked(candidate, null, "not_selected", evidence);
     selectionRank += 1;
-    return ranked(candidate, selectionRank, "selected", uniqueEvidence);
+    for (const message of evidence) {
+      seenIds.add(message.id);
+      seenContent.add(normalizeGenerationText(message.content));
+    }
+    return ranked(candidate, selectionRank, "selected", evidence);
   });
 }
 
