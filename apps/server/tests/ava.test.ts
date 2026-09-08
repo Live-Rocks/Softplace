@@ -13,10 +13,10 @@ import {
 import {
   buildAvaEventDetailInput,
   buildAvaEventDetailInstructions,
-  eventBackgroundFallback,
   getAvaEventDefinition,
   getAvaEventPhase,
   listAvaEventDefinitions,
+  resolveAvaEventMoment,
   selectNextAvaEvent,
   validateAvaEventDetail
 } from "../src/domain/avaEvents.js";
@@ -121,37 +121,32 @@ test("Ava memory extraction only keeps low-sensitive stable details", () => {
 test("Ava prompt discloses AI truthfully and includes shared life without claiming real actions", () => {
   const prompt = buildAvaInstructions({
     relationship: "new",
-    activity: "在家改文案",
-    moodNote: "步調有點慢",
-    receivedActivity: "正在桌前改文案",
-    currentActivity: "出門買晚餐",
+    receivedContext: "文案改寫第 1 天，今天活動進行中；正在改寫內容文案",
+    currentActivity: "正在過自己的晚間時間，步調比較放鬆",
     currentTone: "剛放下工作，語氣慢慢鬆下來",
     eventContext: {
       title: "文案改寫",
       day: 1,
+      stage: "after",
+      stageLabel: "結束後",
       activity: "改寫一段內容文案",
       moodNote: "在不同句子之間找更剛好的語氣",
-      progress: "語氣開始靠近想要的方向，還在慢慢試",
-      completion: "begin"
+      background: "今天的改寫已經停筆，留下可以隔天再看的版本"
     },
-    eventBackground: "今天慢慢把一段文案收整到比較安靜的狀態。",
     memories: ["我喜歡清淡一點的菜"],
     proactive: false
   });
   assert.match(prompt, /AI 虛擬朋友/);
-  assert.match(prompt, /在家改文案/);
   assert.match(prompt, /不要虛構現實世界的見面/);
   assert.match(prompt, /我喜歡清淡一點的菜/);
-  assert.match(prompt, /最近一則訊息傳來時：正在桌前改文案/);
-  assert.match(prompt, /目前：出門買晚餐/);
-  assert.match(prompt, /不必每次主動報告行程/);
-  assert.match(prompt, /偶爾可帶出的具體生活片刻/);
-  assert.match(prompt, /持續事件骨架/);
-  assert.match(prompt, /文案改寫，第 1 天/);
-  assert.match(prompt, /今天是改寫一段內容文案/);
-  assert.match(prompt, /事件底色：在不同句子之間找更剛好的語氣/);
-  assert.match(prompt, /不要重述、報進度/);
-  assert.match(prompt, /不代表這件事仍在持續未完/);
+  assert.match(prompt, /最近一則訊息傳來時：文案改寫第 1 天/);
+  assert.match(prompt, /目前：正在過自己的晚間時間/);
+  assert.match(prompt, /今天的持續事件：文案改寫，事件第 1 天/);
+  assert.match(prompt, /今天活動進度：結束後/);
+  assert.match(prompt, /此刻適用的生活背景：今天的改寫已經停筆/);
+  assert.match(prompt, /事件第幾天不代表此刻已完成/);
+  assert.match(prompt, /不要每次報行程、重述背景/);
+  assert.doesNotMatch(prompt, /今天共同的生活背景/);
   assert.doesNotMatch(prompt, /startMinute|endMinute|delayMinutes/);
 });
 
@@ -172,11 +167,65 @@ test("Ava global event definitions balance work and life with a clear ending", (
       event.key
     );
     for (const phase of event.phases) {
+      assert.ok(phase.activityStartMinute >= 0, `${event.key}:${phase.key}`);
+      assert.ok(phase.activityEndMinute <= 24 * 60, `${event.key}:${phase.key}`);
+      assert.ok(phase.activityStartMinute < phase.activityEndMinute, `${event.key}:${phase.key}`);
+      assert.ok(phase.beforeBackground.length > 0, `${event.key}:${phase.key}`);
+      assert.ok(phase.duringBackground.length > 0, `${event.key}:${phase.key}`);
+      assert.ok(phase.afterBackground.length > 0, `${event.key}:${phase.key}`);
       assert.ok(phase.visibleDetails.length > 0, `${event.key}:${phase.key}`);
       assert.ok(phase.scene.length > 0, `${event.key}:${phase.key}`);
       assert.ok(phase.progress.length > 0, `${event.key}:${phase.key}`);
     }
   }
+});
+
+test("every Ava event phase resolves before, during, and after without early completion", () => {
+  for (const event of listAvaEventDefinitions()) {
+    for (let eventDay = 1; eventDay <= event.durationDays; eventDay += 1) {
+      const phase = getAvaEventPhase(event.key, eventDay);
+      const before = resolveAvaEventMoment({
+        eventKey: event.key,
+        eventDay,
+        minuteOfDay: Math.max(0, phase.activityStartMinute - 1),
+        eventDetail: "這份每日細節只應在活動結束後出現。"
+      });
+      const atStart = resolveAvaEventMoment({ eventKey: event.key, eventDay, minuteOfDay: phase.activityStartMinute, eventDetail: "活動細節。" });
+      const beforeEnd = resolveAvaEventMoment({ eventKey: event.key, eventDay, minuteOfDay: phase.activityEndMinute - 0.01, eventDetail: "活動細節。" });
+      const atEnd = resolveAvaEventMoment({ eventKey: event.key, eventDay, minuteOfDay: phase.activityEndMinute, eventDetail: "活動結束後的每日細節。" });
+      assert.equal(before.stage, "before", `${event.key}:${phase.key}:before`);
+      assert.equal(atStart.stage, "during", `${event.key}:${phase.key}:start`);
+      assert.equal(beforeEnd.stage, "during", `${event.key}:${phase.key}:before-end`);
+      assert.equal(atEnd.stage, "after", `${event.key}:${phase.key}:end`);
+      assert.doesNotMatch(before.background, /每日細節/);
+      assert.doesNotMatch(atStart.background, /活動細節/);
+      assert.equal(atEnd.background, "活動結束後的每日細節。");
+    }
+  }
+});
+
+test("a final event day is preparing in the morning and complete only after its activity", () => {
+  const morning = resolveAvaEventMoment({ eventKey: "copywriting-sprint", eventDay: 2, minuteOfDay: 9 * 60, eventDetail: "文案最後版本已經定下。" });
+  const evening = resolveAvaEventMoment({ eventKey: "copywriting-sprint", eventDay: 2, minuteOfDay: 19 * 60, eventDetail: "文案最後版本已經定下。" });
+  assert.equal(morning.stage, "before");
+  assert.doesNotMatch(morning.background, /已經定下/);
+  assert.equal(evening.stage, "after");
+  assert.match(evening.background, /已經定下/);
+});
+
+test("life events do not inherit an unrelated office or copywriting story", () => {
+  const moment = resolveAvaEventMoment({ eventKey: "grocery-and-cooking", eventDay: 2, minuteOfDay: 18 * 60 });
+  const prompt = buildAvaInstructions({
+    relationship: "familiar",
+    currentActivity: getAvaLifeContext(taipeiTime("2026-07-22T18:00:00")).currentActivity,
+    currentTone: "剛結束白天的事情，語氣慢慢鬆下來",
+    eventContext: moment,
+    memories: [],
+    proactive: true
+  });
+  assert.match(prompt, /補貨做飯/);
+  assert.match(prompt, /正在廚房處理食材/);
+  assert.doesNotMatch(prompt, /(公司|對稿|提案|文案)/);
 });
 
 test("Ava event selection is deterministic, avoids the last three runs, and rebalances categories", () => {
@@ -213,7 +262,8 @@ test("Ava event daily detail input includes concrete scene clues and a same-run 
   assert.match(prompt, /可見線索：被標記的兩句話、闔上的筆記本/);
   assert.match(buildAvaEventDetailInstructions(), /匿名互動限店員、櫃台、路人或店家/);
   assert.match(buildAvaEventDetailInstructions(), /至少一個可觀察的小片刻/);
-  assert.equal(eventBackgroundFallback({ activity: "整理桌面", moodNote: "步調很慢" }), "今天正在整理桌面，心情是步調很慢。");
+  assert.match(buildAvaEventDetailInstructions(), /不是生成當下的即時狀態/);
+  assert.match(buildAvaEventDetailInstructions(), /避免「剛剛、現在、目前、已經/);
 });
 
 test("Ava event daily detail preserves event anchors and rejects relationships, direct address, and invalid lengths", () => {

@@ -11,7 +11,6 @@ import {
   AVA_KEY,
   availabilityLabel,
   canScheduleAvaProactiveAt,
-  dailyLifeForDate,
   getAvaLifeContext,
   relationshipStage,
   shouldScheduleProactive
@@ -101,7 +100,7 @@ export async function ensureAvaUser(userId: string) {
 
 export async function ensureAvaDailyState(now = new Date()) {
   const date = localDate(now);
-  const life = dailyLifeForDate(date);
+  const life = getAvaLifeContext(now);
   const eventRun = await ensureAvaEventRun(date);
   const eventDay = daysBetween(eventRun.starts_on, date) + 1;
   const phase = getAvaEventPhase(eventRun.event_key, eventDay);
@@ -112,8 +111,7 @@ export async function ensureAvaDailyState(now = new Date()) {
         companion_key: AVA_KEY,
         local_date: date,
         timezone: "Asia/Taipei",
-        // Keep the existing daily-life background untouched until v0.3.4b.
-        activity: life.activity,
+        activity: life.dailyActivity,
         mood_note: life.moodNote,
         event_run_id: eventRun.id,
         event_key: eventRun.event_key,
@@ -128,6 +126,17 @@ export async function ensureAvaDailyState(now = new Date()) {
     .single();
   if (error) throw error;
   return data as AvaDailyState;
+}
+
+export async function getAvaDailyStateForDate(date: string) {
+  const { data, error } = await admin()
+    .from("companion_daily_states")
+    .select("*")
+    .eq("companion_key", AVA_KEY)
+    .eq("local_date", date)
+    .maybeSingle();
+  if (error) throw error;
+  return data as AvaDailyState | null;
 }
 
 export async function claimAvaDailyEventDetail(now = new Date()): Promise<AvaEventDetailTask | null> {
@@ -425,12 +434,12 @@ export async function claimAvaJobs(workerToken: string) {
   return data ?? [];
 }
 
-export async function getAvaJobContext(job: any) {
+export async function getAvaJobContext(job: any, now = new Date()) {
   const [user, messages, memories, daily] = await Promise.all([
     ensureAvaUser(job.user_id),
     listAvaMessages(job.user_id, 30),
     listAvaMemories(job.user_id),
-    ensureAvaDailyState()
+    ensureAvaDailyState(now)
   ]);
   return { user, messages: messages.messages, memories, daily };
 }

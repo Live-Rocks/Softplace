@@ -149,6 +149,8 @@ curl -X POST "https://softplace.zeabur.app/internal/companion/tick" \
 
 `retrieval` 統計與 Ava 獨立；只要 Shadow 開啟，同一 tick 即使 Ava 關閉仍會處理 Retrieval jobs 與 Generation retention cleanup。
 
+Ava 事件的活動時間窗與準備／進行／結束後背景定義在 server 程式，不需要額外 migration。每日 `event_detail` 仍只生成一次，作為整日活動素材：活動開始前不送進回覆 prompt，活動進行中只用固定場景，活動結束後才可作為回顧。跨日收到訊息時只查詢既有 `companion_daily_states`；缺少歷史 row 時使用中性時段背景，不會由 Worker 補建過去日期。
+
 Supabase 啟用 Cron、`pg_net` 與 Vault。Cron job：
 
 - Name：`ava-companion-tick`

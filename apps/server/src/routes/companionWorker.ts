@@ -1,13 +1,14 @@
 import { Router } from "express";
 import { config } from "../config.js";
 import { buildAvaInput, buildAvaInstructions, extractSafeAvaMemory, getAvaLifeContext, relationshipStage } from "../domain/ava.js";
-import { eventBackgroundFallback, getAvaEventDefinition, getAvaEventPhase } from "../domain/avaEvents.js";
+import { getAvaEventDefinition, resolveAvaEventMoment } from "../domain/avaEvents.js";
 import {
   claimAvaDailyEventDetail,
   claimAvaJobs,
   completeAvaDailyEventDetail,
   completeAvaJob,
   getAvaJobContext,
+  getAvaDailyStateForDate,
   getPushTokens,
   newWorkerToken,
   releaseAvaDailyEventDetail,
@@ -58,24 +59,27 @@ export function companionWorkerRouter() {
 
       for (const job of jobs) {
         try {
-          const context = await getAvaJobContext(job);
+          const now = new Date();
+          const context = await getAvaJobContext(job, now);
           const proactive = job.job_type === "proactive";
-          const currentLife = getAvaLifeContext();
+          const currentLife = getAvaLifeContext(now);
           const latestUser = proactive ? undefined : [...context.messages].reverse().find((message) => message.role === "user");
           const receivedLife = latestUser ? getAvaLifeContext(new Date(latestUser.createdAt)) : undefined;
-          const eventContext = resolveEventContext(context.daily);
+          const receivedDaily = receivedLife
+            ? receivedLife.localDate === context.daily.local_date
+              ? context.daily
+              : await getAvaDailyStateForDate(receivedLife.localDate)
+            : null;
+          const currentEvent = resolveEventContext(context.daily, currentLife.localSecondOfDay / 60);
+          const receivedEvent = receivedLife && receivedDaily
+            ? resolveEventContext(receivedDaily, receivedLife.localSecondOfDay / 60)
+            : undefined;
           const instructions = buildAvaInstructions({
             relationship: relationshipStage(context.user.relationship_started_at, context.user.reply_count),
-            activity: context.daily.activity,
-            moodNote: context.daily.mood_note,
-            receivedActivity: receivedLife?.currentActivity,
+            receivedContext: receivedEvent ? describeEventMoment(receivedEvent) : receivedLife?.currentActivity,
             currentActivity: currentLife.currentActivity,
             currentTone: currentLife.tone,
-            eventContext,
-            eventBackground: context.daily.event_detail ?? eventBackgroundFallback({
-              activity: context.daily.skeleton_activity ?? context.daily.activity,
-              moodNote: context.daily.skeleton_mood_note ?? context.daily.mood_note
-            }),
+            eventContext: currentEvent,
             memories: context.memories.map((memory) => memory.content),
             proactive
           });
@@ -132,16 +136,16 @@ export function companionWorkerRouter() {
   return router;
 }
 
-function resolveEventContext(daily: AvaDailyState) {
+function resolveEventContext(daily: AvaDailyState, minuteOfDay: number) {
   if (!daily.event_key || !daily.event_day || !daily.skeleton_activity || !daily.skeleton_mood_note) return undefined;
-  const event = getAvaEventDefinition(daily.event_key);
-  const phase = getAvaEventPhase(daily.event_key, daily.event_day);
-  return {
-    title: event.title,
-    day: daily.event_day,
-    activity: daily.skeleton_activity,
-    moodNote: daily.skeleton_mood_note,
-    progress: phase.progress,
-    completion: phase.completion
-  };
+  return resolveAvaEventMoment({
+    eventKey: daily.event_key,
+    eventDay: daily.event_day,
+    minuteOfDay,
+    eventDetail: daily.event_detail
+  });
+}
+
+function describeEventMoment(moment: NonNullable<ReturnType<typeof resolveEventContext>>) {
+  return `${moment.title}第 ${moment.day} 天，今天活動${moment.stageLabel}；${moment.background}`;
 }

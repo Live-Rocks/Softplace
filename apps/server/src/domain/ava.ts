@@ -33,6 +33,16 @@ export type AvaLifeContext = {
   minutesUntilTransition: number;
 };
 
+function neutralActivityForBlock(block: AvaScheduleBlock) {
+  if (block.startMinute === 0) return "正在休息，沒有繼續看訊息";
+  if (block.startMinute === 8 * 60) return "剛起床，正在吃早餐、慢慢醒來";
+  if (block.startMinute === 9 * 60) return "正在準備開始今天的事情";
+  if (block.startMinute === 12 * 60) return "正在吃東西，讓自己休息一下";
+  if (block.startMinute === 17 * 60 + 30) return "正在把白天手邊的事情告一段落";
+  if (block.startMinute === 19 * 60) return "正在過自己的晚間時間，步調比較放鬆";
+  return "正在專心處理手邊的事情";
+}
+
 type ScheduleCopy = {
   morning: string;
   transition: string;
@@ -203,9 +213,9 @@ export function getAvaLifeContext(now = new Date()): AvaLifeContext {
 
   return {
     localDate,
-    dailyActivity: life.activity,
-    moodNote: life.moodNote,
-    currentActivity: block.activity,
+    dailyActivity: "照著今天的節奏生活",
+    moodNote: "保留自然的精神與情緒起伏",
+    currentActivity: neutralActivityForBlock(block),
     tone: block.tone,
     availability: block.availability,
     delayMinutes: block.delayMinutes,
@@ -298,20 +308,18 @@ export function shouldScheduleProactive(input: {
 
 export function buildAvaInstructions(input: {
   relationship: "new" | "familiar" | "close";
-  activity: string;
-  moodNote: string;
-  receivedActivity?: string;
+  receivedContext?: string;
   currentActivity: string;
   currentTone: string;
   eventContext?: {
     title: string;
     day: number;
+    stage: "before" | "during" | "after";
+    stageLabel: "準備" | "進行中" | "結束後";
     activity: string;
     moodNote: string;
-    progress: string;
-    completion: "begin" | "continue" | "complete" | "transition";
+    background: string;
   };
-  eventBackground: string;
   memories: string[];
   proactive: boolean;
 }) {
@@ -325,11 +333,9 @@ export function buildAvaInstructions(input: {
 你的個性安靜、敏感，有一點乾乾的幽默。你有自己的生活節奏，不像客服，也不總是同意使用者。
 ${relationshipText}
 
-今天共同的生活背景：${input.activity}。你此刻的底色：${input.moodNote}。
-${input.receivedActivity ? `最近一則訊息傳來時：${input.receivedActivity}。\n` : ""}目前：${input.currentActivity}。此刻的語氣底色：${input.currentTone}。
-這些生活情境只用來影響語氣與脈絡，不必每次主動報告行程，也不要為了顯得有生活而在背景外創造新的具體事件。
-${input.eventContext ? `持續事件骨架（只供理解，不要主動報行程）：${input.eventContext.title}，第 ${input.eventContext.day} 天；今天是${input.eventContext.activity}。事件底色：${input.eventContext.moodNote}。${input.eventContext.progress}。狀態：${input.eventContext.completion}。\n` : ""}偶爾可帶出的具體生活片刻：${input.eventBackground}
-這只是可在剛好貼合當下時輕描淡寫帶出的背景；不要重述、報進度或把對方的話題拉走。它不是你對使用者說過的話，不是每次提起的聊天主題，也不代表這件事仍在持續未完。若事件狀態是 complete 或 transition，不要寫成仍在忙。
+${input.receivedContext ? `最近一則訊息傳來時：${input.receivedContext}。\n` : ""}目前：${input.currentActivity}。此刻的語氣底色：${input.currentTone}。
+${input.eventContext ? `今天的持續事件：${input.eventContext.title}，事件第 ${input.eventContext.day} 天。\n今天活動進度：${input.eventContext.stageLabel}（${input.eventContext.stage}）。\n當日活動：${input.eventContext.activity}。情緒底色：${input.eventContext.moodNote}。\n此刻適用的生活背景：${input.eventContext.background}。\n` : ""}事件是程式定義的虛構生活時間線，不是系統觀察到的真實活動。事件第幾天不代表此刻已完成；只依「今天活動進度」理解現在是在準備、進行中或結束後。
+這些生活情境只用來影響語氣與脈絡。只在貼合當下時輕描淡寫帶出，不要每次報行程、重述背景或把對方的話題拉走，也不要在背景外創造另一件工作、外出或重大事件。
 ${input.proactive ? "這是你主動傳出的訊息。分享一個自然的小片刻，不催促、不抱怨對方沒找你，也不要用問題逼回覆。" : "回應對方真正提到的細節，像熟悉朋友傳訊息。不要做心理分析、講課或每次都用問題收尾。"}
 
 你可以有自己的感受、偏好和不同意見，但不要虛構現實世界的見面、觸碰或行動。若被直接問是不是 AI，誠實回答。

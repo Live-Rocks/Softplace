@@ -1,6 +1,6 @@
 # SoftPlace 專案狀態
 
-最後核對：`2026-09-02`（以目前 worktree 為準）
+最後核對：`2026-09-08`（以目前 worktree 為準）
 
 目前階段：本人使用／少量封測前的 staging
 
@@ -10,7 +10,7 @@
 
 | 名稱 | 目前值 | 說明 |
 | --- | --- | --- |
-| Current engineering milestone | `Retrieval Phase 2.4.1` | Adaptive cutoff `0.40` 已實作、待 staging 部署實測 |
+| Current engineering milestone | `Ava unified event timeline` | 事件活動與分時進度已統一，待 staging 長時間實測 |
 | Expo manifest | `0.3.1` | `apps/mobile/app.json` |
 | Legacy npm package | `0.2.0` | 歷史 workspace package metadata |
 
@@ -62,6 +62,7 @@
 - **程式已驗證**：主動訊息的安靜時間、可用狀態、未讀與 pending job 限制。
 - **程式已驗證**：Ava 關係階段、低敏感記憶、每日生成額度與資料刪除。
 - **使用者實機確認**：Ava 全域事件保存為 2～3 天的 run 與每日 phase；每日細節已在 staging 成功生成，並低調注入回覆背景。
+- **程式已驗證、待部署實測**：具體生活改由事件 phase 單一決定，分時作息只保留 availability、延遲、睡眠與安靜時間；每個 phase 依活動時間解析準備／進行中／結束後，生成 detail 只在活動結束後進入回覆。跨日歷史背景採 read-only 查詢，缺資料時使用中性背景。
 - **已實作待驗證**：同一 event run 的跨日承接、長時間主動訊息頻率與內容品質仍需持續實測。
 - **程式已驗證**：Ava assistant 回覆依句子顯示為最多 3 個泡泡，資料庫仍保存完整原文。
 - **使用者實機確認**：首個 Preview APK（EAS build `81f8db28-51aa-4a0d-acfa-8f81bfc629f6`）已在 Android 安裝；設定頁顯示「Ava 推播：已註冊」，並成功收到第一則包含 Ava 完整內文的遠端推播。Mobile 通知權限、Expo Push Token 註冊、Server sender、EAS FCM V1 與 Firebase Android app 的端到端鏈路已驗收。
@@ -80,7 +81,7 @@
 
 1. 關閉 Generation 後部署 Phase 2.4.1；不需 migration 或 evidence refresh。重新開啟後重測三個固定正例、no-recall 與模糊回指，確認 0.40 修復哭泣 recall 且未增加錯誤注入。
 2. 累積並檢閱 10 個 `user_evidence_adaptive` injected runs，確認 helpful、錯誤召回、abstention 與 timeout rate；0.45／0.40 runs 沿用同一 strategy，需依部署時間人工區分。
-3. 長時間實測 Ava 延遲回覆、主動訊息、未讀與跨日生活脈絡。
+3. 部署並觀察至少一個完整 2～3 天 Ava 事件，確認活動前後順序、跨日承接與完成後不反覆說仍在進行；主動訊息機械感另案處理。
 4. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。
 5. 在少量封測前補齊監控、錯誤可讀性、資料刪除與隱私說明。
 

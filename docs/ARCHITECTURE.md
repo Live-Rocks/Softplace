@@ -124,7 +124,7 @@ sequenceDiagram
     S-->>M: 新訊息與 state
 ```
 
-Ava 生活以 `Asia/Taipei` 計算。分時作息仍由 server 程式決定；全域事件保存為 2～3 天的 `ava_event_runs` 與每日 phase，同一天對所有使用者相同。Worker 每天為該 phase 生成一份全域事件細節，失敗時回退固定骨架；這份背景會低調注入回覆與主動訊息，但不讀取或保存任何使用者私訊。完整分時表留在 server；OpenAI 只收到「訊息傳來時」、「目前」與精簡事件背景。Ava 每次 tick 最多 claim 1 個到期 job，lease 與 RPC 避免重複完成；同一 endpoint 也會獨立處理 Retrieval Shadow jobs，即使 Ava feature 關閉仍可運作。
+Ava 生活以 `Asia/Taipei` 計算。分時作息只負責 availability、回覆延遲、睡眠與安靜時間；具體生活內容由全域 2～3 天 `ava_event_runs` 與每日 phase 決定，同一天對所有使用者相同。每個 phase 在程式中定義活動開始／結束時間與準備、進行中、結束後三段背景，避免事件日的最終 phase 在早上就被誤認為完成。Worker 每天為該 phase 生成一份全域事件素材，活動開始前不注入、進行中只使用固定場景、結束後才可使用完整生成細節；失敗時回退固定背景。收到訊息時與目前時間分別解析，跨日歷史只讀取既有 daily state，缺資料時使用中性時段背景，不建立歷史事件。這些背景不讀取或保存任何使用者私訊。Ava 每次 tick 最多 claim 1 個到期 job，lease 與 RPC 避免重複完成；同一 endpoint 也會獨立處理 Retrieval Shadow jobs，即使 Ava feature 關閉仍可運作。
 
 Mobile 已安裝通知套件，登入後會取得並向 Server 註冊 Expo Push Token；Server Worker 完成 Ava 回覆後會送出遠端推播，點擊通知可導向 Ava。Android Preview APK 已完成 token 註冊及背景／關閉 App 收訊的實機驗收；iOS 尚未納入這次驗收。Ava 頁面每 12 秒、App 其他分頁每 30 秒的輪詢仍保留，用於前景畫面與狀態同步，也作為推播未送達時的 fallback。
 
