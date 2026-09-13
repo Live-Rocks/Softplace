@@ -7,9 +7,9 @@ import type { Message } from "@softplace/shared";
 import { config } from "../config.js";
 import { buildShadowQueryParts } from "../domain/retrievalShadow.js";
 import { supabaseAdmin } from "../integrations/supabase.js";
+import { RETRIEVAL_PAGE_SIZE, keysetWindow, type Keyset } from "./retrievalPagination.js";
 
 const labels = { m: "must", a: "acceptable", f: "forbidden", i: "irrelevant" } as const;
-const REVIEW_PAGE_SIZE = 50;
 
 export async function main(argv = process.argv.slice(2)) {
   const userId = value(argv, "user-id");
@@ -21,13 +21,21 @@ export async function main(argv = process.argv.slice(2)) {
   const rl = readline.createInterface({ input, output });
   let reviewedRuns = 0;
   try {
-    reviewedRuns = await scanReviewRuns({
+    const observedAt = new Date().toISOString();
+    const { data: upperRows, error: upperError } = await db.from("retrieval_shadow_runs")
+      .select("id,created_at").eq("user_id", userId).eq("status", "completed").lte("created_at", observedAt)
+      .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(1);
+    if (upperError) throw new Error("shadow_review_read_failed");
+    reviewedRuns = await scanKeysetReviewRuns({
       limit,
-      pageSize: REVIEW_PAGE_SIZE,
-      async loadPage(from, to) {
-        const { data, error } = await db.from("retrieval_shadow_runs")
+      upper: upperRows?.[0] ? { primary: upperRows[0].created_at, id: upperRows[0].id } : null,
+      pageSize: RETRIEVAL_PAGE_SIZE,
+      async loadPage(cursor, upper, pageSize) {
+        const query = db.from("retrieval_shadow_runs")
           .select("id,query_message_id,created_at").eq("user_id", userId).eq("status", "completed")
-          .order("created_at", { ascending: true }).range(from, to);
+          .or(keysetWindow("created_at", cursor, upper)).order("created_at", { ascending: true }).order("id", { ascending: true })
+          .limit(pageSize);
+        const { data, error } = await query;
         if (error) throw new Error("shadow_review_read_failed");
         return data ?? [];
       },
@@ -37,16 +45,14 @@ export async function main(argv = process.argv.slice(2)) {
         if (candidateError) throw new Error("shadow_review_read_failed");
         const pendingCandidates = candidatesToReview(candidates ?? []);
         if (!pendingCandidates.length) return false;
-        const { data: query, error: queryError } = await db.from("messages")
-          .select("id,conversation_id,message_sequence,role,content,model_used,mode,image_present,crisis_detected,created_at")
-          .eq("id", run.query_message_id).single();
-        if (queryError || !query) throw new Error("shadow_review_read_failed");
-        const { data: queryMessages, error: queryMessagesError } = await db.from("messages")
-          .select("id,conversation_id,message_sequence,role,content,model_used,mode,image_present,crisis_detected,created_at")
-          .eq("conversation_id", query.conversation_id)
-          .lte("message_sequence", query.message_sequence)
-          .order("message_sequence", { ascending: true });
+        const { data: queryMessages, error: queryMessagesError } = await db.rpc("get_retrieval_shadow_run_context", {
+          p_run_id: run.id,
+          p_user_id: userId
+        });
         if (queryMessagesError) throw new Error("shadow_review_read_failed");
+        if (!(queryMessages ?? []).some((message: any) => message.id === run.query_message_id)) {
+          throw new Error("shadow_review_context_missing");
+        }
         const queryParts = buildShadowQueryParts((queryMessages ?? []).map(mapMessage), run.query_message_id);
         console.info(formatReviewHeader(run.id, queryParts));
         for (const candidate of pendingCandidates) {
@@ -74,6 +80,32 @@ export async function main(argv = process.argv.slice(2)) {
   }
   console.info("[retrieval-shadow:review]", { reviewedRuns });
   return { reviewedRuns };
+}
+
+export async function scanKeysetReviewRuns<T>(input: {
+  limit: number;
+  pageSize: number;
+  upper: Keyset | null;
+  loadPage: (cursor: Keyset | null, upper: Keyset, limit: number) => Promise<T[]>;
+  key?: (run: T) => Keyset;
+  reviewRun: (run: T) => Promise<boolean>;
+}) {
+  if (!input.upper) return 0;
+  let reviewed = 0;
+  let cursor: Keyset | null = null;
+  while (reviewed < input.limit) {
+    const page = await input.loadPage(cursor, input.upper, input.pageSize);
+    if (!page.length) break;
+    for (const run of page) {
+      cursor = input.key?.(run) ?? {
+        primary: (run as any).created_at,
+        id: (run as any).id
+      };
+      if (await input.reviewRun(run)) reviewed += 1;
+      if (reviewed >= input.limit) break;
+    }
+  }
+  return reviewed;
 }
 
 export async function scanReviewRuns<T>(input: {

@@ -69,6 +69,7 @@
 14. `014_retrieval_generation_local_rerank.sql`：Generation Top 20 搜尋、selection rank／decision 與 `top20_local_rerank` 記錄。
 15. `015_retrieval_user_evidence.sql`：chunk evidence embedding、user-only Generation 搜尋與 `user_evidence_top20` 記錄。
 16. `016_retrieval_evidence_adaptive.sql`：`below_relevance` decision、`user_evidence_adaptive` 記錄 RPC 與既有 strategy 相容約束。
+17. `017_retrieval_observability.sql`：長對話 bounded context RPC、`phase25_v1` 實際設定、可核對來源 manifest、完整 review 欄位與原子 observation RPC。
 
 已執行的 migration 不回頭改寫；修正以新編號追加。執行前先讀 SQL，執行後保存結果並跑對應 smoke test。
 
@@ -191,7 +192,7 @@ npm run retrieval:shadow:backfill -- --user-id=<uuid> --confirm
 
 ```bash
 npm run retrieval:shadow:review -- --user-id=<uuid> --limit=25
-npm run retrieval:shadow:report
+npm run retrieval:shadow:report -- --user-id=<uuid>
 ```
 
 Review 指令會在本機終端臨時顯示實際 embedding 使用的最近兩則 user context、current query、Top 5 候選與 threshold 狀態，不會寫出含全文檔案。`--limit` 代表本次要新完成的 runs 數量；工具會分頁跳過已完整標註的 runs，並接續 partial run 尚未標註的 candidates。
@@ -217,10 +218,10 @@ Phase 2.2 Top 20 Local Evidence Rerank 部署順序：
 
 ```bash
 npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
-npm run retrieval:generation:report
+npm run retrieval:generation:report -- --user-id=<uuid>
 ```
 
-舊策略檢閱結果依 strategy 隔離保存；Phase 2.4 起 Review 預設只處理 `user_evidence_adaptive`。工具在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。Report 依 strategy 分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
+舊策略檢閱結果依 strategy 隔離保存；Phase 2.5 起 Review 預設只處理目前 `evaluation_version=phase25_v1`，舊資料須明確指定版本。工具在本機終端臨時 join 最近 10 則、本輪訊息、Top 20 原始候選、每個本機選擇決策、實際 user-only 注入與最終回覆；只要求替實際 injected candidates 標 `must/acceptable/forbidden/irrelevant`，回覆標 `helpful/neutral/harmful` 並回答 stale／sensitive。Report 依版本與實際設定分組並輸出排除原因、錯誤階段、平均注入數、latency 與 token；只寫脫敏彙總至 gitignored `artifacts/retrieval-generation/`。
 
 ### Phase 2.3 User-only Evidence Search
 
@@ -287,6 +288,48 @@ Phase 2.4 的 0.45 Canary 中，貓咪與武漢正確注入，哭泣證據以 Ra
 4. 以兩則普通 user 訊息隔開每題，重測貓咪、武漢、哭泣；預期正確 Rank 1、`injected_count=1`、無錯誤。
 5. 另測一題 no-recall 與一題模糊回指，預期 `abstained`。若錯誤、敏感或過時證據被注入，立即關閉 Generation。
 6. 繼續完成 10 個 `user_evidence_adaptive` reviewed injected runs；報告會混合 0.45／0.40，判讀時必須以部署時間辨識本輪資料。
+
+### Phase 2.5 長對話與評估完整性
+
+Phase 2.5 不改變搜尋與生成參數；仍是 `user_evidence_adaptive`、Top 20、`max(0.40, best × 0.90)`、最多五個候選、最近 10 則、1,200 tokens 與 2.5 秒。它把新版觀測標為 `evaluation_version=phase25_v1`，並以 manifest 保存來源 ID、順序、Unicode code-point 截斷長度及 hash，不另存聊天全文。
+
+部署順序：
+
+1. 保持單一知情 UUID allowlist，設定 `RETRIEVAL_GENERATION_ENABLED=false` 並等待 Zeabur 重啟；Shadow 可保持開啟。
+2. 在 staging Supabase 執行 additive migration `017_retrieval_observability.sql`。舊 RPC 保留，尚未部署的新 server 不會使用新表與 RPC。
+3. 部署新 server，確認 `/health`、一般 Light／Deep 與 Shadow tick 正常後，再將 Generation 改回 `true`。
+4. 建立一筆 injected 與一筆 abstained，確認 run 的 `evaluation_version=phase25_v1`、manifest row 存在，且新版 review 能顯示 `verified` 的當時輸入。
+5. 產生第一份新版 report；必須看到 `dataComplete=true`。若為 false，先修復缺筆或 retention 競態，不得把品質結果視為通過。
+
+新版 Generation review 預設涵蓋 injected、abstained 與 fallback。第一步只顯示當時 history/query，先判斷是否需要最近 10 則以外的舊證據；第二步才顯示候選、已核對注入與回答：
+
+```bash
+npm run retrieval:generation:review -- --user-id=<uuid> --limit=10
+npm run retrieval:generation:review -- --user-id=<uuid> --status=abstained --limit=5
+npm run retrieval:generation:review -- --user-id=<uuid> --run-id=<run-uuid> --redo
+```
+
+`--status` 可用 `all|injected|abstained|fallback`；`--version` 預設 `phase25_v1`。`--from`／`--to` 必須含時區且採 `[from,to)`。`--run-id` 是單筆操作，不能搭配時間、status 或 limit；只有指定單筆才可使用 `--redo`。每一步立即保存，`Ctrl+C` 後可從 partial review 接續。查證正確來源時可輸入 message ID，或在終端以字串搜尋同 user／conversation 且早於 query 的歷史；全文不會寫進 artifact。
+
+Report 也可限定 user、版本與時間；省略 user 時只產生匿名的多使用者分組，不能合成單一 Canary gate：
+
+```bash
+npm run retrieval:generation:report -- --user-id=<uuid>
+npm run retrieval:generation:report -- --user-id=<uuid> --version=phase25_v1 \
+  --from=2026-09-09T00:00:00+08:00 --to=2026-09-16T00:00:00+08:00
+npm run retrieval:shadow:report -- --user-id=<uuid> \
+  --from=2026-09-09T00:00:00+08:00 --to=2026-09-16T00:00:00+08:00
+```
+
+Phase 2.5 的工程驗證與品質驗收分開。樣本至少要有 10 筆 verified required、10 筆 not_needed，且至少 10 筆完整 reviewed injected，因此總數可能超過 20。報告會列 Known-evidence Hit@20、注入證據命中、選擇漏失、候選池外漏失、正確 abstention、不必要注入、timeout、token 與 latency；零分母顯示 `N/A`。既有 helpful ≥50%、timeout ≤10%、harmful／stale／sensitive／injected forbidden 全為 0 仍保留，但即使都通過也只顯示待人工 go/no-go。
+
+本機可用 Docker 相容環境執行 migration 001～017 與 SQL integration fixtures：
+
+```bash
+npm run test:retrieval:sql
+```
+
+這項測試會建立臨時 pgvector PostgreSQL，驗證 3,000-message bounded RPC、ownership、RLS、原子寫入、idempotency、manifest、retention 與 cascade；不連正式 Supabase，也不呼叫 OpenAI。
 
 ## Expo Go 與未來 Preview APK
 

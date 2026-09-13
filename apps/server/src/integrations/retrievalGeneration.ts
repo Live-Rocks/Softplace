@@ -3,12 +3,15 @@ import type { Message } from "@softplace/shared";
 import { config } from "../config.js";
 import {
   RETRIEVAL_GENERATION,
+  buildGenerationManifest,
   buildGenerationQuery,
+  generationEffectiveThreshold,
   generationSearchBeforeSequence,
   prepareGenerationContext,
   rerankGenerationCandidates,
   retrievalGenerationErrorCode,
   type GenerationCandidate,
+  type GenerationManifest,
   type GenerationSelectionDecision
 } from "../domain/retrievalGeneration.js";
 import { RETRIEVAL_SHADOW } from "../domain/retrievalShadow.js";
@@ -30,6 +33,9 @@ export type GenerationRetrievalResult = {
   totalLatencyMs: number;
   retrievalTokens: number;
   errorCode: string | null;
+  effectiveThreshold: number | null;
+  searchBeforeSequence: number | null;
+  manifest: GenerationManifest | null;
 };
 
 export type GenerationRetrievalInput = {
@@ -69,8 +75,10 @@ export async function retrieveForGeneration(input: GenerationRetrievalInput): Pr
   const started = performance.now();
   const deadline = started + RETRIEVAL_GENERATION.timeoutMs;
   const timings = { embeddingLatencyMs: 0, searchLatencyMs: 0 };
+  const query = buildGenerationQuery(input.history, input.currentQuery);
+  const beforeSequence = generationSearchBeforeSequence(input.history);
   try {
-    return await runRetrieval(input, started, deadline, timings);
+    return await runRetrieval(input, query, beforeSequence, started, deadline, timings);
   } catch (error) {
     return {
       status: "fallback",
@@ -80,21 +88,24 @@ export async function retrieveForGeneration(input: GenerationRetrievalInput): Pr
       searchLatencyMs: timings.searchLatencyMs,
       totalLatencyMs: Math.max(0, Math.round(performance.now() - started)),
       retrievalTokens: 0,
-      errorCode: retrievalGenerationErrorCode(error)
+      errorCode: retrievalGenerationErrorCode(error),
+      effectiveThreshold: null,
+      searchBeforeSequence: beforeSequence,
+      manifest: buildGenerationManifest({ history: input.history, query, prepared: null })
     };
   }
 }
 
 async function runRetrieval(
   input: GenerationRetrievalInput,
+  query: ReturnType<typeof buildGenerationQuery>,
+  beforeSequence: number | null,
   started: number,
   deadline: number,
   timings: { embeddingLatencyMs: number; searchLatencyMs: number }
 ): Promise<GenerationRetrievalResult> {
   if (!supabaseAdmin) throw new Error("generation_search_failed");
-  const beforeSequence = generationSearchBeforeSequence(input.history);
-  if (beforeSequence === null) return emptyResult(started);
-  const query = buildGenerationQuery(input.history, input.currentQuery);
+  if (beforeSequence === null) return emptyResult(started, input.history, query);
   const client = config.openAiApiKey ? new OpenAI({
     apiKey: config.openAiApiKey,
     timeout: RETRIEVAL_GENERATION.timeoutMs,
@@ -155,6 +166,10 @@ async function runRetrieval(
   }
   const reranked = rerankGenerationCandidates(candidates);
   const prepared = prepareGenerationContext(reranked.filter((candidate) => candidate.selectionDecision === "selected"));
+  const formattedChunkIds = new Set(prepared?.injectedChunkIds ?? []);
+  const effectiveThreshold = generationEffectiveThreshold(reranked
+    .filter((candidate) => !["invalid_source", "recall_probe_only", "boilerplate_only"].includes(candidate.selectionDecision))
+    .map((candidate) => candidate.score));
   if (performance.now() > deadline) throw new Error("generation_retrieval_timeout");
   return {
     status: prepared ? "injected" : "abstained",
@@ -163,15 +178,19 @@ async function runRetrieval(
       chunkId: candidate.chunkId,
       rank: candidate.rank,
       score: candidate.score,
-      injected: candidate.selectionDecision === "selected",
-      selectionRank: candidate.selectionRank,
-      selectionDecision: candidate.selectionDecision
+      injected: formattedChunkIds.has(candidate.chunkId),
+      selectionRank: formattedChunkIds.has(candidate.chunkId) ? candidate.selectionRank : null,
+      selectionDecision: candidate.selectionDecision === "selected" && !formattedChunkIds.has(candidate.chunkId)
+        ? "not_selected" : candidate.selectionDecision
     })),
     embeddingLatencyMs: timings.embeddingLatencyMs,
     searchLatencyMs: timings.searchLatencyMs,
     totalLatencyMs: Math.max(0, Math.round(performance.now() - started)),
     retrievalTokens: prepared?.tokenCount ?? 0,
-    errorCode: null
+    errorCode: null,
+    effectiveThreshold,
+    searchBeforeSequence: beforeSequence,
+    manifest: buildGenerationManifest({ history: input.history, query, prepared })
   };
 }
 
@@ -226,7 +245,7 @@ export function isValidGenerationSourceWindow(sourceRows: Array<{
 
 export async function recordGenerationRun(input: GenerationRunRecord) {
   if (!supabaseAdmin) return;
-  const { error } = await supabaseAdmin.rpc("record_retrieval_generation_adaptive_run", {
+  const { error } = await supabaseAdmin.rpc("record_retrieval_generation_observed_run", {
     p_user_id: input.userId,
     p_conversation_id: input.conversationId,
     p_query_message_id: input.queryMessageId,
@@ -246,7 +265,22 @@ export async function recordGenerationRun(input: GenerationRunRecord) {
     p_actual_input_tokens: input.tokenMetrics.actualInputTokens,
     p_cached_input_tokens: input.tokenMetrics.cachedInputTokens,
     p_output_tokens: input.tokenMetrics.outputTokens,
-    p_candidates: input.retrieval.candidates
+    p_candidates: input.retrieval.candidates,
+    p_evaluation: {
+      evaluationVersion: RETRIEVAL_GENERATION.evaluationVersion,
+      selectionVersion: RETRIEVAL_GENERATION.selectionVersion,
+      queryBuilderVersion: RETRIEVAL_GENERATION.queryBuilderVersion,
+      evidenceFilterVersion: RETRIEVAL_GENERATION.evidenceFilterVersion,
+      contextFormatterVersion: RETRIEVAL_GENERATION.contextFormatterVersion,
+      minimumScore: RETRIEVAL_GENERATION.minimumScore,
+      relativeScoreRatio: RETRIEVAL_GENERATION.relativeScoreRatio,
+      effectiveThreshold: input.retrieval.effectiveThreshold,
+      searchBeforeSequence: input.retrieval.searchBeforeSequence,
+      timeoutMs: RETRIEVAL_GENERATION.timeoutMs
+    },
+    p_manifest: input.retrieval.manifest
+      ? { ...input.retrieval.manifest, currentQueryMessageId: input.queryMessageId }
+      : null
   });
   if (error) throw new Error("generation_observation_write_failed");
 }
@@ -259,7 +293,11 @@ export async function cleanupGenerationRuns() {
   if (error) throw new Error("generation_cleanup_failed");
 }
 
-function emptyResult(started: number): GenerationRetrievalResult {
+function emptyResult(
+  started: number,
+  history: Message[],
+  query: ReturnType<typeof buildGenerationQuery>
+): GenerationRetrievalResult {
   return {
     status: "abstained",
     context: null,
@@ -268,7 +306,10 @@ function emptyResult(started: number): GenerationRetrievalResult {
     searchLatencyMs: 0,
     totalLatencyMs: Math.max(0, Math.round(performance.now() - started)),
     retrievalTokens: 0,
-    errorCode: null
+    errorCode: null,
+    effectiveThreshold: null,
+    searchBeforeSequence: null,
+    manifest: buildGenerationManifest({ history, query, prepared: null })
   };
 }
 

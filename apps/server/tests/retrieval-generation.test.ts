@@ -4,18 +4,27 @@ import test from "node:test";
 import type { Message } from "@softplace/shared";
 import {
   RETRIEVAL_GENERATION,
+  buildGenerationManifest,
   buildGenerationQuery,
   classifyGenerationMessage,
   countTokens,
   generationSearchBeforeSequence,
   prepareGenerationContext,
+  replayGenerationManifest,
   rerankGenerationCandidates,
   retrievalGenerationErrorCode,
   type GenerationCandidate
 } from "../src/domain/retrievalGeneration.js";
 import { isValidGenerationSourceWindow, withDeadline } from "../src/integrations/retrievalGeneration.js";
-import { buildGenerationReport } from "../src/scripts/retrievalGenerationReport.js";
-import { formatGenerationCandidate, formatGenerationReviewHeader, yesNo } from "../src/scripts/retrievalGenerationReview.js";
+import {
+  buildGenerationReport, buildPhase25Evaluation, buildPhase25UserGroups, generationDataComplete
+} from "../src/scripts/retrievalGenerationReport.js";
+import {
+  formatGenerationCandidate, formatGenerationReviewHeader, parseGenerationReviewArgs, resolveEvidence,
+  parseEvidenceGroups, scanGenerationReviewRuns, scanHistoryMatches, yesNo
+} from "../src/scripts/retrievalGenerationReview.js";
+import { collectKeysetPages, keysetWindow } from "../src/scripts/retrievalPagination.js";
+import { loadChunkSources } from "../src/scripts/retrievalEvidenceBackfill.js";
 
 const history: Message[] = [
   message("u1", 11, "user", "主管昨天又把企劃改掉"),
@@ -232,6 +241,209 @@ test("generation review formatting identifies injected candidates and validates 
   assert.throws(() => yesNo("maybe"), /invalid yes\/no/);
 });
 
+test("phase 2.5 manifest exactly replays UTF-8 JSON, emoji, escaping, and code-point truncation", () => {
+  const replayHistory = [
+    message("history-u", 1, "user", "繁中🙂：他說 \\\"好\\\""),
+    message("history-a", 2, "assistant", "收到\\n下一行")
+  ];
+  const current = "現在想起貓咪🐈‍⬛嗎？";
+  const source = message("source-u", 3, "user", `證據🙂「\\\\路徑」${"很長的繁體內容🐾".repeat(100)}`);
+  const prepared = prepareGenerationContext([candidate("chunk", 1, 0.8, [source])], { tokenBudget: 180 });
+  assert.ok(prepared);
+  assert.ok(prepared.sources[0]!.messages[0]!.prefixCodePoints < [...source.content].length);
+  const query = buildGenerationQuery(replayHistory, current);
+  const manifest = buildGenerationManifest({ history: replayHistory, query, prepared });
+  const currentMessage = message("current", 4, "user", current);
+  const sources = new Map([...replayHistory, source, currentMessage].map((item) => [item.id, item]));
+  const replay = replayGenerationManifest(manifest, sources, currentMessage.id);
+  assert.equal(replay.verification, "verified");
+  assert.deepEqual(
+    Buffer.from(JSON.stringify(replay.history), "utf8"),
+    Buffer.from(JSON.stringify(replayHistory), "utf8")
+  );
+  assert.deepEqual(Buffer.from(replay.retrievalContext!, "utf8"), Buffer.from(prepared.text, "utf8"));
+  assert.deepEqual(Buffer.from(replay.embeddingInput!, "utf8"), Buffer.from(query.text, "utf8"));
+
+  const changed = new Map(sources);
+  changed.set(source.id, { ...source, content: `${source.content}被修改` });
+  assert.equal(replayGenerationManifest(manifest, changed, currentMessage.id).verification, "unverifiable");
+});
+
+test("keyset pagination reads 3,000 rows even when the database returns only 37 per page", async () => {
+  const rows = Array.from({ length: 3000 }, (_, index) => ({
+    id: `id-${String(index).padStart(5, "0")}`,
+    sequence: index < 3 ? 0 : Math.floor(index / 3)
+  }));
+  const upper = { primary: rows.at(-1)!.sequence, id: rows.at(-1)!.id };
+  let calls = 0;
+  const loaded = await collectKeysetPages({
+    upper,
+    pageSize: 200,
+    key: (row) => ({ primary: row.sequence, id: row.id }),
+    async loadPage(cursor, fixedUpper) {
+      calls += 1;
+      return rows.filter((row) => {
+        const key = { primary: row.sequence, id: row.id };
+        const after = !cursor || row.sequence > Number(cursor.primary)
+          || (row.sequence === cursor.primary && key.id > cursor.id);
+        const before = row.sequence < Number(fixedUpper.primary)
+          || (row.sequence === fixedUpper.primary && key.id <= fixedUpper.id);
+        return after && before;
+      }).slice(0, 37);
+    }
+  });
+  assert.equal(loaded.length, 3000);
+  assert.equal(new Set(loaded.map((row) => row.id)).size, 3000);
+  assert.ok(calls > 80);
+  assert.match(keysetWindow("message_sequence", { primary: 0, id: "a" }, { primary: 0, id: "z" }), /id\.gt\.a/);
+});
+
+test("phase 2.5 reporting keeps 1,000 runs and 20,000 candidates complete and grouped per user", () => {
+  const runs = Array.from({ length: 1000 }, (_, index) => ({
+    id: `run-${index}`, user_id: index < 500 ? "user-a" : "user-b", status: "injected" as const,
+    selection_strategy: "user_evidence_adaptive" as const, injected_count: 1, candidate_count: 20,
+    model: "gpt-test",
+    embedding_model: "text-embedding-3-small", dimensions: 512, chunk_strategy: "dialogue_window",
+    injection_strategy: "user_only", candidate_limit: 20, injection_limit: 5, history_limit: 10,
+    retrieval_token_budget: 1200, selection_version: "adaptive_v1", query_builder_version: "recent_user_2_v1",
+    evidence_filter_version: "evidence_filter_v1", context_formatter_version: "retrieved_user_history_v1",
+    minimum_score: 0.4, relative_score_ratio: 0.9, retrieval_timeout_ms: 2500,
+    embedding_latency_ms: 200, search_latency_ms: 100, total_retrieval_latency_ms: 300,
+    history_10_tokens: 500, history_20_tokens: 1000, retrieval_tokens: 80,
+    actual_input_tokens: 1200, output_tokens: 100, response_effect: "helpful" as const,
+    stale_detected: false, sensitive_detected: false, error_code: null,
+    evaluation_version: "phase25_v1", manifest_verification: "verified",
+    review_completed_at: "2026-09-09T00:00:00.000Z",
+    retrieval_need: index % 50 === 0 ? "required" as const : index % 50 === 1 ? "not_needed" as const : "uncertain" as const,
+    question_type: "other", evidence_groups: index % 50 === 0 ? [[`evidence-${index}`]] : [],
+    evidence_resolution: index % 50 === 0 ? "injected_complete" : index % 50 === 1 ? "not_applicable" : "unresolved"
+  }));
+  const candidates = runs.flatMap((run) => Array.from({ length: 20 }, (_, index) => ({
+    id: `${run.id}-candidate-${index}`, run_id: run.id, injected: index === 0,
+    selection_decision: index === 0 ? "selected" : "below_relevance",
+    review_label: index === 0 ? "must" : null
+  })));
+  assert.equal(candidates.length, 20_000);
+  assert.equal(generationDataComplete(runs, candidates), true);
+  assert.equal(generationDataComplete(runs, candidates.slice(1)), false);
+  assert.equal(generationDataComplete(runs, candidates, 999), false);
+  const combined = buildPhase25Evaluation(runs, candidates, true);
+  assert.equal(combined.userGroups, 2);
+  assert.equal(combined.qualityChecksPass, false);
+  assert.equal(combined.settings[0].embeddingModel, "text-embedding-3-small");
+  assert.equal(combined.settings[0].generationModel, "gpt-test");
+  assert.equal(combined.settings[0].retrievalTokenBudget, 1200);
+  const unscopedSingleUser = buildPhase25Evaluation(runs.slice(0, 500), candidates.slice(0, 10_000), true, false);
+  assert.equal(unscopedSingleUser.qualityGateEligible, false);
+  assert.equal(unscopedSingleUser.qualityChecksPass, false);
+  const groups = buildPhase25UserGroups(runs, candidates, true);
+  assert.deepEqual(Object.keys(groups), ["user_1", "user_2"]);
+  assert.equal(groups.user_1.sampleSufficient, true);
+  assert.equal(groups.user_2.sampleSufficient, true);
+});
+
+test("generation review CLI validates filters before database access", () => {
+  const userId = "11111111-1111-4111-8111-111111111111";
+  assert.deepEqual(parseGenerationReviewArgs([`--user-id=${userId}`]), {
+    userId, limit: 10, status: "all", version: "phase25_v1", redo: false
+  });
+  assert.equal(parseGenerationReviewArgs([`--user-id=${userId}`, "--status=fallback", "--limit=3"]).status, "fallback");
+  assert.equal(parseGenerationReviewArgs([`--user-id=${userId}`, "--run-id=run", "--redo"]).redo, true);
+  assert.throws(() => parseGenerationReviewArgs([`--user-id=${userId}`, "--from=2026-09-09"]), /timezone/);
+  assert.throws(() => parseGenerationReviewArgs([`--user-id=${userId}`, "--run-id=abc", "--limit=1"]), /cannot be combined/);
+  assert.throws(() => parseGenerationReviewArgs([`--user-id=${userId}`, "--redo"]), /requires --run-id/);
+});
+
+test("generation review streams short pages, resumes partial rows, and stops at the requested limit", async () => {
+  const pages = [
+    [{ id: "a", created_at: "2026-09-09T00:00:00Z", complete: true }],
+    [
+      { id: "b", created_at: "2026-09-09T00:00:01Z", complete: false },
+      { id: "c", created_at: "2026-09-09T00:00:02Z", complete: true }
+    ],
+    [
+      { id: "d", created_at: "2026-09-09T00:00:03Z", complete: false },
+      { id: "e", created_at: "2026-09-09T00:00:04Z", complete: false }
+    ]
+  ];
+  let page = 0;
+  const visited: string[] = [];
+  const reviewed = await scanGenerationReviewRuns({
+    limit: 2,
+    upper: { primary: "2026-09-09T00:00:04Z", id: "e" },
+    pageSize: 200,
+    async loadPage() { return pages[page++] ?? []; },
+    async reviewRun(run) {
+      visited.push(run.id);
+      return !run.complete;
+    }
+  });
+  assert.equal(reviewed, 2);
+  assert.deepEqual(visited, ["a", "b", "c", "d"]);
+  assert.equal(page, 3);
+});
+
+test("generation review resolves alternative evidence groups, truncation, candidate misses, and fallback", () => {
+  const baseManifest = {
+    version: "phase25_v1" as const, historyMessageIds: ["recent"], historyHash: "",
+    queryContext: [], currentQueryPrefixCodePoints: 1, currentQueryHash: "", embeddingInputHash: "",
+    injectedCandidates: [{ chunkId: "chunk", rank: 1, messages: [
+      { messageId: "injected", sequence: 1, prefixCodePoints: 2, sourceHash: "" }
+    ] }], retrievalContextHash: null, retrievalContextTokens: 0, formatterVersion: "retrieved_user_history_v1"
+  };
+  const candidates = [{ source: [{ id: "candidate" }, { id: "injected" }] }];
+  const sources = new Map<string, any>([["injected", { content: "四個字元" }]]);
+  assert.equal(resolveEvidence([["missing"], ["recent"]], baseManifest, candidates, sources, "injected"), "in_recent_history");
+  assert.equal(resolveEvidence([["injected"]], baseManifest, candidates, sources, "injected"), "injected_truncated");
+  assert.equal(resolveEvidence([["candidate"]], baseManifest, candidates, sources, "abstained"), "candidate_not_injected");
+  assert.equal(resolveEvidence([["outside"]], baseManifest, candidates, sources, "abstained"), "outside_candidate_pool");
+  assert.equal(resolveEvidence([["injected"]], baseManifest, candidates, sources, "fallback"), "search_incomplete");
+});
+
+test("generation review parses evidence alternatives and searches all short history pages", async () => {
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  const third = "33333333-3333-4333-8333-333333333333";
+  assert.deepEqual(parseEvidenceGroups(`${first},${second};${third}`), [[first, second], [third]]);
+  assert.equal(parseEvidenceGroups("not-a-uuid"), null);
+
+  const rows = Array.from({ length: 12 }, (_, index) => ({
+    id: `message-${String(index).padStart(2, "0")}`,
+    message_sequence: index,
+    role: index % 2 ? "assistant" : "user",
+    content: index === 10 ? "我第一次出國去了中國武漢" : `普通訊息 ${index}`
+  }));
+  let pageIndex = 0;
+  const pages = [rows.slice(0, 3), rows.slice(3, 6), rows.slice(6, 9), rows.slice(9), []];
+  const matches = await scanHistoryMatches({
+    upper: { primary: 11, id: "message-11" }, term: "中國武漢", pageSize: 200,
+    async loadPage() { return pages[pageIndex++]!; }
+  });
+  assert.deepEqual(matches.map((row) => row.id), ["message-10"]);
+  assert.equal(pageIndex, 5);
+});
+
+test("evidence source backfill batches exact ranges instead of querying once per chunk", async () => {
+  const rows = [
+    { id: "u", conversation_id: "conversation", message_sequence: 1, role: "user", content: "事實", model_used: null, mode: null, image_present: false, crisis_detected: false, created_at: "2026-01-01T00:00:00Z" },
+    { id: "a", conversation_id: "conversation", message_sequence: 2, role: "assistant", content: "回覆", model_used: null, mode: null, image_present: false, crisis_detected: false, created_at: "2026-01-01T00:00:01Z" },
+    { id: "u2", conversation_id: "conversation", message_sequence: 3, role: "user", content: "更多事實", model_used: null, mode: null, image_present: false, crisis_detected: false, created_at: "2026-01-01T00:00:02Z" }
+  ];
+  let reads = 0;
+  const query: any = {
+    select() { return this; }, eq() { return this; }, or() { reads += 1; return this; }, order() { return this; },
+    then(resolve: (value: unknown) => void) { resolve({ data: rows, error: null }); }
+  };
+  const db = { from() { return query; } };
+  const chunks = Array.from({ length: 60 }, (_, index) => ({
+    id: `chunk-${index}`, conversation_id: "conversation", anchor_message_id: "u2", start_sequence: 1, end_sequence: 3
+  }));
+  const loaded = await loadChunkSources(db, chunks, 25);
+  assert.equal(reads, 3);
+  assert.equal(loaded.size, 60);
+  assert.equal(loaded.get("chunk-59")?.length, 3);
+});
+
 test("generation report requires 25 reviewed injected runs, half helpful, and zero harm", () => {
   const runs = Array.from({ length: 25 }, (_, index) => ({
     id: `run-${index}`,
@@ -406,9 +618,9 @@ test("generation recording, review, and reporting isolate the current adaptive s
     fs.readFile(new URL("../src/scripts/retrievalGenerationReview.ts", import.meta.url), "utf8"),
     fs.readFile(new URL("../src/scripts/retrievalGenerationReport.ts", import.meta.url), "utf8")
   ]);
-  assert.match(integration, /rpc\("record_retrieval_generation_adaptive_run"/);
+  assert.match(integration, /rpc\("record_retrieval_generation_observed_run"/);
   assert.match(integration, /rpc\("match_retrieval_generation_evidence_chunks"/);
-  assert.match(review, /\.eq\("selection_strategy", "user_evidence_adaptive"\)/);
+  assert.match(review, /evaluation_version/);
   assert.match(report, /run\.selection_strategy === "top5_all"/);
   assert.match(report, /run\.selection_strategy === "threshold_top2"/);
   assert.match(report, /run\.selection_strategy === "top20_local_rerank"/);
@@ -425,6 +637,28 @@ test("adaptive evidence migration preserves old strategies and records relevance
   assert.match(sql, /c\.evidence_embedding is not null/);
   assert.match(sql, /candidate_count|v_candidate_count/);
   assert.match(sql, /to service_role/);
+});
+
+test("phase 2.5 migration adds bounded context RPCs, versioned manifests, atomic recording, and review state", async () => {
+  const sql = await fs.readFile(new URL("../../../supabase/migrations/017_retrieval_observability.sql", import.meta.url), "utf8");
+  assert.match(sql, /evaluation_version text not null default 'legacy_unknown'/);
+  assert.match(sql, /create table public\.retrieval_generation_manifests/);
+  assert.match(sql, /get_retrieval_shadow_job_context/);
+  assert.match(sql, /get_retrieval_shadow_run_context/);
+  assert.match(sql, /order by m\.message_sequence desc, m\.id desc limit 2/);
+  assert.match(sql, /message_sequence between q\.message_sequence - 2 and q\.message_sequence/);
+  assert.match(sql, /record_retrieval_generation_observed_run/);
+  assert.match(sql, /record_retrieval_generation_adaptive_run/);
+  assert.match(sql, /selectionVersion' <> 'adaptive_v1'/);
+  assert.match(sql, /queryBuilderVersion' <> 'recent_user_2_v1'/);
+  assert.match(sql, /evidenceFilterVersion' <> 'evidence_filter_v1'/);
+  assert.match(sql, /contextFormatterVersion' <> 'retrieved_user_history_v1'/);
+  assert.match(sql, /currentQueryMessageId/);
+  assert.match(sql, /generation_manifest_conflict/);
+  assert.match(sql, /record_retrieval_generation_review/);
+  assert.match(sql, /review_completed_at/);
+  assert.match(sql, /enable row level security/);
+  assert.match(sql, /to service_role/g);
 });
 
 test("user evidence migration aligns generation search with injected user text and supports backfill", async () => {

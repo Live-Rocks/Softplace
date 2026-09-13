@@ -115,6 +115,26 @@ artifacts/retrieval-eval/reports/<timestamp>/report.md
 - 每個候選保存原始 rank／score、selection rank 與固定 decision；Review 只要求標註實際 injected candidates，但會顯示完整候選池與排除原因。Report 與舊 `threshold_top2`／`top5_all` 完全分開。
 - Phase 2.2 已因固定案例與 timeout gate 失敗，Phase 2.3 則因過度注入只保留為 recall 基線。Phase 2.4.1 需重新人工確認三個固定正例、no-recall 與模糊回指，並完成 10 個 `user_evidence_adaptive` reviewed injected runs；helpful 至少 50%、timeout 不高於 10%，且 harmful／stale／sensitive／injected forbidden 全為 0。0.45／0.40 沿用同一 strategy，需依部署時間區分，程式完成不代表 Canary 已通過。
 
+## Phase 2.5 長對話與完整評估
+
+Phase 2.5 不改 `user_evidence_adaptive` 的搜尋、選擇或生成參數，重點是讓資料與結論可以被完整驗證：
+
+- 新 run 使用 `evaluation_version=phase25_v1`，另外保存 selection、query builder、evidence filter、formatter 版本及實際模型、維度、Top K、history、token、門檻與 timeout。舊 rows 維持 `legacy_unknown`，不以日期猜測設定。
+- Manifest 只保存 history/query/injected source 的 message/chunk ID、有序位置、Unicode code-point 前綴長度與 SHA-256，不另存聊天全文。Review 由來源重建當時 history、embedding input 與 retrieval JSON；來源刪除、內容變動、hash 不符或 formatter 不支援時標為 `unverifiable`，不納入正式驗收。
+- Shadow worker 改由 ownership-bound RPC 只取 query、最近兩則合格 context 與精確三訊息窗口。Backfill、review、report 全部改用固定執行上界的 keyset pagination，不能因一頁少於請求數就提前結束。
+- Report 以同一批 runs 分頁讀取 candidates，若 run 在執行中消失、candidate count 不一致或資料遭 retention 清理，標示 `data_complete=false` 並禁止產生品質通過結論。跨使用者只輸出匿名分組，不合併 Canary gate。
+
+Review 先在不顯示候選的情況下標記 `required／not_needed／uncertain` 與題型，再查看候選、當時實際注入和回答。Required 題可記錄多組替代證據；每組可包含多則共同必要訊息，命中任一完整組才算 evidence hit。新版指標為：
+
+- **Known-evidence Hit@20**：具已驗證舊證據且搜尋完成的 required runs 中，Top 20 包含至少一組完整答案的比例。
+- **Injected evidence hit rate**：具已驗證舊證據的 required runs 中，最終注入包含完整答案的比例；fallback 算未命中並另列原因。
+- **Selection miss**：正解已在候選池，但因選擇或截斷未完整注入。
+- **Outside-pool miss**：已知歷史正解未進候選池；只陳述漏失，不以現在重跑向量推論當時原因。
+- **Correct abstention**：not_needed 且搜尋正常完成的 runs 中，最後 abstained 的比例。
+- **Unnecessary injection**：not_needed 且搜尋正常完成的 runs 中，仍 injected 的比例。Fallback 不算正確 abstention。
+
+工程完成不等於品質通過。單一 `phase25_v1` 設定至少需要 10 筆 verified required、10 筆 not_needed，且至少 10 筆完整 reviewed injected；另外保留 helpful ≥50%、timeout ≤10%，harmful／stale／sensitive／injected forbidden 全為 0。新增漏召回與不必要注入指標本輪只報告、不預設硬門檻；最終仍由人工 go/no-go。
+
 ## 修改資料集
 
 新增或修改案例後先執行：

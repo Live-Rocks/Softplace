@@ -80,11 +80,14 @@ export function createSupabaseShadowStore(): RetrievalShadowStore | null {
       }));
     },
     async getMessages(job) {
-      const { data, error } = await db.from("messages")
-        .select("id,conversation_id,message_sequence,role,content,model_used,mode,image_present,crisis_detected,created_at")
-        .eq("conversation_id", job.conversationId)
-        .order("message_sequence", { ascending: true });
+      const { data, error } = await db.rpc("get_retrieval_shadow_job_context", {
+        p_job_id: job.id,
+        p_user_id: job.userId,
+        p_conversation_id: job.conversationId,
+        p_query_message_id: job.queryMessageId
+      });
       if (error) throw new Error("shadow_context_failed");
+      if (!(data ?? []).some((row: any) => row.id === job.queryMessageId)) throw new Error("shadow_context_failed");
       return (data ?? []).map(mapMessage);
     },
     async match(job, beforeSequence, embedding) {

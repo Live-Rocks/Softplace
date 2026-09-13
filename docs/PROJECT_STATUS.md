@@ -1,6 +1,6 @@
 # SoftPlace 專案狀態
 
-最後核對：`2026-09-08`（以目前 worktree 為準）
+最後核對：`2026-09-09`（以目前 worktree 為準）
 
 目前階段：本人使用／少量封測前的 staging
 
@@ -52,7 +52,8 @@
 - **使用者實測未通過**：Retrieval Phase 2.2 與 migration `014` 已部署。三筆固定測試中，「我在哪裡哭過」在 1,376 ms 正確；「貓咪名字」雖在 506 ms 完成，但正確 user 證據位於 Rank 19、前五名被較弱內容占滿；「第一次出國」在 embedding 階段達 2,500 ms timeout。此結果仍是有效失敗基線，不因清空測試聊天而重算。
 - **使用者實測完成、召回通過但選擇過寬**：Retrieval Phase 2.3、migration `015` 與舊 chunk evidence 回填已部署。貓咪、第一次出國與哭泣三個正確 facts 都由舊資料升到 Rank 1；貓咪與哭泣回覆已確認正確，三筆 retrieval latency 為 510／529／482 ms、均無 timeout。每筆仍固定注入五個 chunks，混入武漢、貓咪、哭泣、求職等無關內容，因此不可視為最終 selection 策略。
 - **使用者實測部分通過**：Retrieval Phase 2.4、migration `016` 與 evidence refresh 已部署。0.45 cutoff 下貓咪與武漢正確回答且各只注入一個 chunk；哭泣正確證據為 Rank 1／`0.4300`，但低於固定門檻而安全 abstain，固定案例為 2／3。Selected chunk 仍可能含一則無關相鄰事實，尚未調整 granularity。
-- **程式已驗證、待部署實測**：Phase 2.4.1 將最低門檻改為 `0.40`，保留最高合格分數 `90%`、重疊窗口排除與所有安全過濾。三組最新 production 分數回播及正反例測試已加入；沿用 `user_evidence_adaptive` 且不新增 migration，0.45／0.40 runs 只能依部署時間人工區分。
+- **使用者固定案例確認、整體樣本未完成**：Phase 2.4.1 將最低門檻改為 `0.40`，保留最高合格分數 `90%`、重疊窗口排除與所有安全過濾。貓咪、武漢、哭泣皆已正確找回且只注入一個候選；新話題 AI 興趣案例正確 abstain，模糊回指在近期語境足夠時正確承接。沿用 `user_evidence_adaptive`，0.45／0.40 歷史 rows 仍只能依部署時間人工區分；尚未完成品質樣本門檻。
+- **程式與本機資料庫已驗證、待部署**：Retrieval Phase 2.5 新增 `phase25_v1` 設定與可核對來源 manifest、長對話 bounded RPC、所有管理工具的固定上界 keyset pagination，以及涵蓋 injected／abstained／fallback 的兩階段 review。普通測試涵蓋 3,000 messages、1,000 runs／20,000 candidates、繁中／emoji／JSON escaping／Unicode 截斷重建；migration `017` 已在隔離的 pgvector PostgreSQL 實際套用並驗證 RLS、ownership、原子寫入、idempotency、retention 與 cascade，尚未套用 staging Supabase。
 
 ### Ava beta
 
@@ -79,15 +80,15 @@
 
 ## 近期優先順序
 
-1. 關閉 Generation 後部署 Phase 2.4.1；不需 migration 或 evidence refresh。重新開啟後重測三個固定正例、no-recall 與模糊回指，確認 0.40 修復哭泣 recall 且未增加錯誤注入。
-2. 累積並檢閱 10 個 `user_evidence_adaptive` injected runs，確認 helpful、錯誤召回、abstention 與 timeout rate；0.45／0.40 runs 沿用同一 strategy，需依部署時間人工區分。
+1. 保持單一 allowlist 並先關閉 Generation；在 staging 套用 migration `017` 後部署 Phase 2.5 server，再以一筆 injected 與一筆 abstained 驗證 `phase25_v1`、manifest 重建與新版 review/report。
+2. 分次累積同一新版設定至少 10 筆 verified required、10 筆 not_needed，且至少 10 筆完整 reviewed injected；確認資料完整、helpful、漏召回、不必要注入與 timeout，最後才人工 go/no-go。
 3. 部署並觀察至少一個完整 2～3 天 Ava 事件，確認活動前後順序、跨日承接與完成後不反覆說仍在進行；主動訊息機械感另案處理。
 4. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。
 5. 在少量封測前補齊監控、錯誤可讀性、資料刪除與隱私說明。
 
 ## 延後項目
 
-Retrieval Phase 0、Phase 1 Shadow 與 Phase 1.5 已完成；Phase 2～2.4.1 僅供單一知情 Deep allowlist Canary，尚未擴大為 production RAG。
+Retrieval Phase 0、Phase 1 Shadow 與 Phase 1.5 已完成；Phase 2～2.5 僅供單一知情 Deep allowlist Canary，尚未擴大為 production RAG。
 
 - 正式付款、訂閱與方案升降級。
 - Google／Apple 等第三方登入。

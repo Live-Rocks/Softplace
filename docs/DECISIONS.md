@@ -145,7 +145,7 @@
 ## ADR-018：Adaptive Evidence Cutoff 與整個重疊窗口排除
 
 - 日期：2026-09-02
-- 狀態：Accepted；Phase 2.4 固定案例 2／3，Phase 2.4.1 待部署實測
+- 狀態：Accepted；Phase 2.4 固定案例 2／3，Phase 2.4.1 固定案例已實測
 - 背景：Phase 2.3 的三個固定事實都升到 Rank 1，貓咪與哭泣回答正確，retrieval 為 482～529 ms；但固定補滿五個仍注入武漢、貓咪、哭泣與求職等互不相關內容。相鄰窗口共用一則 user message 時，舊邏輯只移除重複訊息，讓另一個無關半段繼承整個 chunk 的高相似度。
 - 決定：在不增加模型呼叫的前提下，候選必須同時達到固定最低分 `0.45` 與當次最高合格 evidence 分數的 `90%`；任何 evidence message 與較高順位已選候選重疊時，整個候選標為 `duplicate`，不保留剩餘半段。另將「回來了／嗯是呀／沒關係了」納入低資訊過濾。Evidence embedding 建立時也共用相同分類器：純記憶探問與低資訊 user 文字不進向量，混合窗口只嵌入實際可注入的 user 事實。
 - 影響：三個實測排名重播時都只留下正確 Rank 1；模糊回指若最高分低於 `0.45` 會安全 abstain。既有 evidence embeddings 必須用 `--refresh` 受控重算，純探問窗口會清為 null；舊 assistant 猜測仍可留在原始聊天及 Shadow dialogue 向量，但不會成為 Generation evidence。新結果記為 `user_evidence_adaptive`，Phase 2.3 保留為「召回正確但過度注入」基線；固定值仍須以新策略 runs 檢閱，不能視為 production threshold。
@@ -155,3 +155,11 @@
 - Phase 2.4 實測貓咪與武漢成功，哭泣正確證據雖為 Rank 1，分數 `0.4300` 仍被固定最低 `0.45` 擋下，因此固定案例只通過 2／3。
 - 最低門檻調為 `0.40`，相對門檻仍為最高合格分數的 `90%`；以最新三組 production 分數重播時皆只選正確 Rank 1。此變更沿用 `user_evidence_adaptive`，不新增 migration，0.45／0.40 runs 只能依部署時間人工區分。
 - Selected chunk 仍可能包含一則無關的相鄰 user 事實；本階段不調整 chunk granularity，保留為後續 evidence concentration 改善項目。
+
+## ADR-019：Retrieval 評估採版本化 Manifest 與完整分頁
+
+- 日期：2026-09-09
+- 狀態：Accepted；程式與本機資料庫驗證完成，待 staging 套用 migration `017`
+- 背景：既有 Shadow／Generation 工具可能受資料庫單頁上限影響；只檢閱 injected run 也無法區分正確 abstention、候選池外漏失與 timeout。歷史 `user_evidence_adaptive` 又曾同時包含 0.45／0.40，僅靠日期無法可靠重建當時設定。
+- 決定：worker 改用 ownership-bound 小範圍 RPC；backfill、review、report 全面使用有固定上界的 keyset pagination。每個新版 Generation run 保存 `phase25_v1` 實際設定與來源 manifest，以 message/chunk ID、Unicode 截斷長度及 SHA-256 重建當時輸入，不另存聊天全文。Review 先在看候選前判斷是否需要舊證據，再查證正確來源；報告同時涵蓋 injected、abstained、fallback 與資料完整性。
+- 影響：可在長對話下辨識選擇漏失、候選池外漏失與不必要注入，也能拒絕把來源缺失或 hash 不符的 run 當成已驗證結果。工程驗證與 RAG 品質驗收分開；至少 10 筆 verified required、10 筆 not_needed、10 筆完整 reviewed injected 且資料完整後，仍只交由人工 go/no-go，不自動擴大 Canary。

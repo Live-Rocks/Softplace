@@ -3,7 +3,12 @@ import { z } from "zod";
 import type { ChatResponse } from "@softplace/shared";
 import { config } from "../config.js";
 import { buildCompanionInstructions } from "../domain/companionPrompt.js";
-import { RETRIEVAL_GENERATION, countTokens } from "../domain/retrievalGeneration.js";
+import {
+  RETRIEVAL_GENERATION,
+  buildGenerationManifest,
+  buildGenerationQuery,
+  countTokens
+} from "../domain/retrievalGeneration.js";
 import { suggestMemoriesFromUserText } from "../domain/memory.js";
 import { assessCrisis, buildCrisisResponse } from "../domain/safety.js";
 import { decideCompanionMode } from "../domain/usage.js";
@@ -154,7 +159,7 @@ export function chatRouter(
             conversationId: conversation.id,
             history,
             currentQuery: body.message
-          }).catch(() => fallbackGenerationRetrieval());
+          }).catch(() => fallbackGenerationRetrieval(history, body.message));
         }
         const instructions = buildCompanionInstructions(memories, {
           mode,
@@ -259,7 +264,8 @@ function countMessageContentTokens(messages: Array<{ content: string }>) {
   return countTokens(messages.map((message) => message.content).join("\n"));
 }
 
-function fallbackGenerationRetrieval(): GenerationRetrievalResult {
+function fallbackGenerationRetrieval(history: Parameters<typeof buildGenerationQuery>[0], currentQuery: string): GenerationRetrievalResult {
+  const query = buildGenerationQuery(history, currentQuery);
   return {
     status: "fallback",
     context: null,
@@ -268,7 +274,10 @@ function fallbackGenerationRetrieval(): GenerationRetrievalResult {
     searchLatencyMs: 0,
     totalLatencyMs: RETRIEVAL_GENERATION.timeoutMs,
     retrievalTokens: 0,
-    errorCode: "generation_retrieval_failed"
+    errorCode: "generation_retrieval_failed",
+    effectiveThreshold: null,
+    searchBeforeSequence: null,
+    manifest: buildGenerationManifest({ history, query, prepared: null })
   };
 }
 

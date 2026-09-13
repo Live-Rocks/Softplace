@@ -5,7 +5,7 @@ import type { Message } from "@softplace/shared";
 import { RETRIEVAL_SHADOW, buildShadowDialogueWindow, buildShadowQuery, buildShadowQueryParts, buildShadowUserEvidence, truncate } from "../src/domain/retrievalShadow.js";
 import { processRetrievalShadowJobs, shadowErrorCode, type RetrievalShadowStore } from "../src/integrations/retrievalShadow.js";
 import { qualityAtThreshold } from "../src/scripts/retrievalShadowReport.js";
-import { candidatesToReview, formatCandidateHeader, formatReviewHeader, scanReviewRuns } from "../src/scripts/retrievalShadowReview.js";
+import { candidatesToReview, formatCandidateHeader, formatReviewHeader, scanKeysetReviewRuns, scanReviewRuns } from "../src/scripts/retrievalShadowReview.js";
 
 const messages: Message[] = [
   message("u1", 1, "user", "主管昨天又改了企劃"),
@@ -150,6 +150,27 @@ test("review pagination handles exhaustion and resumes only unlabeled candidates
   assert.deepEqual(candidatesToReview([{ id: 1, review_label: "irrelevant" }]), []);
 });
 
+test("keyset review keeps scanning after short pages and resumes partial runs", async () => {
+  const rows = Array.from({ length: 18 }, (_, index) => ({
+    id: `run-${String(index).padStart(2, "0")}`,
+    created_at: `2026-09-09T00:00:${String(Math.floor(index / 2)).padStart(2, "0")}.000Z`,
+    complete: index < 12
+  }));
+  const visited: string[] = [];
+  const reviewed = await scanKeysetReviewRuns({
+    limit: 5,
+    pageSize: 10,
+    upper: { primary: rows.at(-1)!.created_at, id: rows.at(-1)!.id },
+    async loadPage(cursor) {
+      return rows.filter((row) => !cursor || row.created_at > cursor.primary
+        || (row.created_at === cursor.primary && row.id > cursor.id)).slice(0, 3);
+    },
+    async reviewRun(run) { visited.push(run.id); return !run.complete; }
+  });
+  assert.equal(reviewed, 5);
+  assert.deepEqual(visited.slice(-5), ["run-12", "run-13", "run-14", "run-15", "run-16"]);
+});
+
 test("worker embeds query, dialogue, and user-only evidence, searches before saving current chunk, and stores no text", async () => {
   const order: string[] = [];
   const completed: any[] = [];
@@ -182,6 +203,30 @@ test("worker embeds query, dialogue, and user-only evidence, searches before sav
   ]);
   assert.deepEqual(order, ["match", "upsert", "complete", "cleanup"]);
   assert.equal(JSON.stringify(completed).includes("果然又來了"), false);
+});
+
+test("worker handles a query after 3,000 messages from at most five RPC context rows", async () => {
+  const contextRows = [
+    message("old-context", 2997, "user", "三千則前的最近脈絡"),
+    message("window-user", 3000, "user", "視窗中的使用者事實"),
+    message("window-assistant", 3001, "assistant", "視窗中的回覆"),
+    message("tail-query", 3002, "user", "現在又想起來了")
+  ];
+  let returnedRows = 0;
+  let queryText = "";
+  const store: RetrievalShadowStore = {
+    async claimJobs() { return [{ id: "job", userId: "user", conversationId: "conversation", queryMessageId: "tail-query", attempts: 1, createdAt: new Date().toISOString() }]; },
+    async getMessages() { returnedRows = contextRows.length; return contextRows; },
+    async match(_job, before) { assert.equal(before, 2997); return []; },
+    async complete() {}, async retry() { throw new Error("unexpected retry"); }, async upsertChunk() {}, async cleanup() {}
+  };
+  const result = await processRetrievalShadowJobs({
+    store,
+    provider: { async embed(texts) { queryText = texts[0]!; return texts.map(() => [1, 0]); } }
+  });
+  assert.deepEqual(result, { claimed: 1, completed: 1, failed: 0 });
+  assert.ok(returnedRows <= 5);
+  assert.match(queryText, /三千則前的最近脈絡|視窗中的使用者事實|現在又想起來了/);
 });
 
 test("worker still stores a dialogue chunk but clears evidence when a window has no injectable user fact", async () => {
