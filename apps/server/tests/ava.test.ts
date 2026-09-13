@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   buildAvaInstructions,
+  buildAvaProactiveInput,
   canScheduleAvaProactiveAt,
   calculateReplyDueAt,
   dailyLifeForDate,
@@ -20,9 +22,50 @@ import {
   selectNextAvaEvent,
   validateAvaEventDetail
 } from "../src/domain/avaEvents.js";
+import {
+  AVA_EVENT_FACTS_VERSION,
+  avaEventFactsJsonSchema,
+  buildAvaEventFactsInput,
+  buildAvaEventFactsInstructions,
+  parseAvaEventFacts,
+  visibleAvaEventFacts,
+  type AvaEventFacts
+} from "../src/domain/avaEventFacts.js";
+import { avaConversationEvalCases } from "../src/evals/avaConversationCases.js";
 
 function taipeiTime(localDateTime: string) {
   return new Date(`${localDateTime}+08:00`);
+}
+
+function copywritingFacts(): AvaEventFacts {
+  return {
+    schemaVersion: AVA_EVENT_FACTS_VERSION,
+    eventTopic: "早餐店菜單文案改寫",
+    concreteSubject: "一份早餐店外帶菜單的版面文案",
+    facts: [
+      { text: "菜單分成蛋餅、吐司和飲料三個區塊", earliestEventDay: 1, earliestStage: "before" },
+      { text: "手寫菜名會和餐點照片放在同一欄", earliestEventDay: 1, earliestStage: "during" },
+      { text: "價格最後統一放在每個品項的右側", earliestEventDay: 2, earliestStage: "after" }
+    ],
+    phases: [
+      {
+        phaseKey: "rewrite",
+        eventDay: 1,
+        activityMaterial: "先重寫蛋餅與吐司區塊的品項說明",
+        activityEarliestStage: "during",
+        completionResult: "第一天留下三個分類清楚的文案版本",
+        completionEarliestStage: "after"
+      },
+      {
+        phaseKey: "refine",
+        eventDay: 2,
+        activityMaterial: "逐項核對飲料名稱和右側價格的位置",
+        activityEarliestStage: "during",
+        completionResult: "菜名、照片與價格排列已經確定下來",
+        completionEarliestStage: "after"
+      }
+    ]
+  };
 }
 
 test("available recent conversations schedule replies between 20 and 90 seconds", () => {
@@ -199,7 +242,8 @@ test("every Ava event phase resolves before, during, and after without early com
       assert.equal(atEnd.stage, "after", `${event.key}:${phase.key}:end`);
       assert.doesNotMatch(before.background, /每日細節/);
       assert.doesNotMatch(atStart.background, /活動細節/);
-      assert.equal(atEnd.background, "活動結束後的每日細節。");
+      assert.match(atEnd.background, new RegExp(phase.afterBackground));
+      assert.match(atEnd.background, /活動結束後的每日細節/);
     }
   }
 });
@@ -280,4 +324,112 @@ test("Ava keeps established event keys resolvable for existing global runs", () 
   assert.equal(getAvaEventDefinition("copywriting-sprint").title, "文案改寫");
   assert.equal(getAvaEventDefinition("brand-proposal-revision").title, "品牌提案修改");
   assert.equal(getAvaEventDefinition("reset-weekend").title, "週末整理散步");
+});
+
+test("Ava event facts are structured, phase-aligned, and queryable", () => {
+  const event = getAvaEventDefinition("copywriting-sprint");
+  const facts = copywritingFacts();
+  assert.deepEqual(parseAvaEventFacts(facts, event), facts);
+  assert.match(buildAvaEventFactsInstructions(), /是什麼、有哪些、為什麼/);
+  assert.match(buildAvaEventFactsInput(event, ["照片挑選：旅行照片小冊"]), /最近三條事件主題/);
+  assert.equal((avaEventFactsJsonSchema(event).properties.phases as { minItems: number }).minItems, event.durationDays);
+
+  const wrongPhase = structuredClone(facts);
+  wrongPhase.phases[0]!.phaseKey = "refine";
+  assert.equal(parseAvaEventFacts(wrongPhase, event), null);
+
+  const relationship = structuredClone(facts);
+  relationship.facts[0]!.text = "和朋友一起挑出三個菜單區塊";
+  assert.equal(parseAvaEventFacts(relationship, event), null);
+
+  const directAddress = structuredClone(facts);
+  directAddress.facts[0]!.text = "想把這份菜單拿給你看看";
+  assert.equal(parseAvaEventFacts(directAddress, event), null);
+
+  const anonymousInteraction = structuredClone(facts);
+  anonymousInteraction.facts[0]!.text = "店員把手寫菜名分成三個菜單區塊";
+  assert.ok(parseAvaEventFacts(anonymousInteraction, event));
+});
+
+test("Ava event facts only become visible at their declared day and stage", () => {
+  const facts = copywritingFacts();
+  const beforeDayOne = visibleAvaEventFacts({ facts, eventDay: 1, stage: "before" });
+  assert.ok(beforeDayOne.includes(facts.eventTopic));
+  assert.ok(beforeDayOne.includes(facts.concreteSubject));
+  assert.ok(beforeDayOne.includes(facts.facts[0]!.text));
+  assert.ok(!beforeDayOne.includes(facts.facts[1]!.text));
+  assert.ok(!beforeDayOne.includes(facts.phases[0]!.activityMaterial));
+
+  const duringDayOne = visibleAvaEventFacts({ facts, eventDay: 1, stage: "during" });
+  assert.ok(duringDayOne.includes(facts.facts[1]!.text));
+  assert.ok(duringDayOne.includes(facts.phases[0]!.activityMaterial));
+  assert.ok(!duringDayOne.includes(facts.phases[0]!.completionResult));
+  assert.ok(!duringDayOne.includes(facts.facts[2]!.text));
+
+  const afterDayTwo = visibleAvaEventFacts({ facts, eventDay: 2, stage: "after" });
+  assert.ok(afterDayTwo.includes(facts.facts[2]!.text));
+  assert.ok(afterDayTwo.includes(facts.phases[1]!.completionResult));
+});
+
+test("Ava event moments keep fixed completion context and append only visible facts", () => {
+  const facts = copywritingFacts();
+  const before = resolveAvaEventMoment({
+    eventKey: "copywriting-sprint",
+    eventDay: 2,
+    minuteOfDay: 9 * 60,
+    eventDetail: "價格已經全部確認完成。",
+    eventFacts: facts
+  });
+  assert.doesNotMatch(before.background, /價格已經全部確認完成/);
+  assert.doesNotMatch(before.background, /菜名、照片與價格排列已經確定下來/);
+
+  const after = resolveAvaEventMoment({
+    eventKey: "copywriting-sprint",
+    eventDay: 2,
+    minuteOfDay: 20 * 60,
+    eventDetail: "價格已經全部確認完成。",
+    eventFacts: facts
+  });
+  assert.match(after.background, /文案最後版本已經定下來/);
+  assert.match(after.background, /價格已經全部確認完成/);
+  assert.match(after.background, /菜名、照片與價格排列已經確定下來/);
+});
+
+test("Ava proactive context preserves the latest thirty roles, time, and proactive metadata", () => {
+  const history = Array.from({ length: 32 }, (_, index) => ({
+    id: `message-${index}`,
+    role: index % 2 ? "assistant" as const : "user" as const,
+    content: `內容 ${index}`,
+    proactive: index === 31,
+    createdAt: new Date(Date.UTC(2026, 7, 2, 2, index)).toISOString(),
+    readAt: null
+  }));
+  const input = buildAvaProactiveInput(history);
+  assert.equal(input.length, 30);
+  assert.equal(input[0]!.role, history[2]!.role);
+  assert.match(input[0]!.content, /內容 2/);
+  assert.match(input.at(-1)!.content, /Ava 主動傳送/);
+});
+
+test("Ava conversation evaluation baseline covers twenty multi-turn behaviors", () => {
+  assert.ok(avaConversationEvalCases.length >= 20);
+  assert.deepEqual(
+    new Set(avaConversationEvalCases.map((item) => item.category)),
+    new Set(["specific-follow-up", "daily-life", "emotional", "proactive"])
+  );
+  assert.ok(avaConversationEvalCases.filter((item) => item.category === "specific-follow-up").length >= 5);
+  assert.ok(avaConversationEvalCases.filter((item) => item.category === "proactive").length >= 5);
+  assert.ok(avaConversationEvalCases.every((item) => item.history.length > 0));
+});
+
+test("migration 018 protects event fact leases and service-role ownership", () => {
+  const sql = readFileSync(new URL("../../../supabase/migrations/018_ava_event_facts.sql", import.meta.url), "utf8");
+  assert.match(sql, /event_facts_status text not null default 'legacy'/);
+  assert.match(sql, /event_facts_status\s*\n\s*\)\s*\n\s*values[\s\S]*?'pending'/);
+  assert.match(sql, /for update skip locked/);
+  assert.match(sql, /interval '30 minutes'/);
+  assert.match(sql, /event_facts_lease_expires_at > now\(\)/);
+  assert.match(sql, /event_facts_lease_token = p_worker_token/);
+  assert.match(sql, /revoke all on function public\.complete_ava_event_facts[\s\S]*from public, anon, authenticated/);
+  assert.match(sql, /grant execute on function public\.complete_ava_event_facts[\s\S]*to service_role/);
 });

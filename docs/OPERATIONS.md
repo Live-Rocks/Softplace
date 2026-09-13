@@ -70,6 +70,7 @@
 15. `015_retrieval_user_evidence.sql`：chunk evidence embedding、user-only Generation 搜尋與 `user_evidence_top20` 記錄。
 16. `016_retrieval_evidence_adaptive.sql`：`below_relevance` decision、`user_evidence_adaptive` 記錄 RPC 與既有 strategy 相容約束。
 17. `017_retrieval_observability.sql`：長對話 bounded context RPC、`phase25_v1` 實際設定、可核對來源 manifest、完整 review 欄位與原子 observation RPC。
+18. `018_ava_event_facts.sql`：Ava event run 的版本化 JSON 事實、原子 lease、30 分鐘失敗重試與 service-role RPC。
 
 已執行的 migration 不回頭改寫；修正以新編號追加。執行前先讀 SQL，執行後保存結果並跑對應 smoke test。
 
@@ -150,7 +151,18 @@ curl -X POST "https://softplace.zeabur.app/internal/companion/tick" \
 
 `retrieval` 統計與 Ava 獨立；只要 Shadow 開啟，同一 tick 即使 Ava 關閉仍會處理 Retrieval jobs 與 Generation retention cleanup。
 
-Ava 事件的活動時間窗與準備／進行／結束後背景定義在 server 程式，不需要額外 migration。每日 `event_detail` 仍只生成一次，作為整日活動素材：活動開始前不送進回覆 prompt，活動進行中只用固定場景，活動結束後才可作為回顧。跨日收到訊息時只查詢既有 `companion_daily_states`；缺少歷史 row 時使用中性時段背景，不會由 Worker 補建過去日期。
+Ava 事件的活動時間窗與準備／進行／結束後背景定義在 server 程式。Migration `018` 之後建立的新 event run 會先生成一份 `event_facts_version=ava_event_facts_v1` 的 JSON 設定；既有 run 保持 `legacy`，不回填。設定未生成時聊天沿用固定 phase 背景，daily detail 暫緩；成功後 daily detail 才加入已保存事實與同 run 前一日背景。事實與完成結果依 event day/stage 遮蔽，daily detail 只在活動結束後作為補充。跨日收到訊息時最多查詢三個既有 `companion_daily_states` 與 run；缺少歷史 row 時使用中性背景，不會由 Worker 補建過去日期。
+
+### Ava event facts 部署與驗收
+
+1. 先在 Supabase 套用 additive migration `018_ava_event_facts.sql`。舊 server 不讀新增欄位，因此可繼續運作。
+2. 再部署新版 server。不要先部署新版 server，否則 facts RPC 尚不存在，Worker 每分鐘都會失敗。
+3. 手動呼叫一次 Worker，確認既有 run 仍為 `legacy` 且聊天正常；等下一條新 run 建立後，確認狀態依序為 `pending → leased → generated`。
+4. `event_facts` 應符合 `ava_event_facts_v1`，包含 3～5 個 facts 及與事件天數一致的 phases。不要把 JSON 或聊天全文寫入正式 logs。
+5. 同一 run 連續追問「是什麼／有哪些／為什麼」，確認回答沿用事實；活動開始前不可說出進行素材，結束前不可說出完成結果。
+6. 觀察至少兩條完整新事件及其主動訊息。人工紀錄直接回答率、事實矛盾／提前完成，以及無關感悟、安慰或告別比例。
+
+若 event facts 生成失敗，`release_ava_event_facts` 會標為 `failed`，30 分鐘後才可再 claim。Lease 預設 120 秒；逾期 token 不能 complete 或 release。外部 OpenAI 呼叫可能成功但資料庫保存失敗，因此這是安全的 at-least-once 嘗試加單一正式版本，不宣稱 exactly-once。
 
 Supabase 啟用 Cron、`pg_net` 與 Vault。Cron job：
 
@@ -323,13 +335,14 @@ npm run retrieval:shadow:report -- --user-id=<uuid> \
 
 Phase 2.5 的工程驗證與品質驗收分開。樣本至少要有 10 筆 verified required、10 筆 not_needed，且至少 10 筆完整 reviewed injected，因此總數可能超過 20。報告會列 Known-evidence Hit@20、注入證據命中、選擇漏失、候選池外漏失、正確 abstention、不必要注入、timeout、token 與 latency；零分母顯示 `N/A`。既有 helpful ≥50%、timeout ≤10%、harmful／stale／sensitive／injected forbidden 全為 0 仍保留，但即使都通過也只顯示待人工 go/no-go。
 
-本機可用 Docker 相容環境執行 migration 001～017 與 SQL integration fixtures：
+本機可用 Docker 相容環境執行 migration 001～018 與 SQL integration fixtures：
 
 ```bash
 npm run test:retrieval:sql
+npm run test:ava-facts:sql
 ```
 
-這項測試會建立臨時 pgvector PostgreSQL，驗證 3,000-message bounded RPC、ownership、RLS、原子寫入、idempotency、manifest、retention 與 cascade；不連正式 Supabase，也不呼叫 OpenAI。
+兩項測試都會建立臨時 pgvector PostgreSQL，不連正式 Supabase，也不呼叫 OpenAI。Retrieval fixture 驗證 3,000-message bounded RPC、ownership、RLS、原子寫入、idempotency、manifest、retention 與 cascade；Ava fixture 驗證 legacy／pending 狀態、並行 claim、lease 過期、舊 token、30 分鐘重試及 service-role 權限。
 
 ## Expo Go 與未來 Preview APK
 
@@ -362,8 +375,9 @@ Mobile 已安裝 `expo-notifications`／`expo-constants`，登入後會建立 `a
 6. 清除／重開 App 後聊天歷史正常。
 7. Ava user message 先 queued，Cron 到期後 completed，App 收到回覆。
 8. Ava proactive、quiet hours、未讀與 daily usage。
-9. Retrieval Shadow／Generation flags、allowlist、fallback 與 Mobile response 隱私邊界。
-10. Logs 不含聊天全文、base64、push token 或 secret。
+9. 下一條新 Ava event run 的 facts 由 `pending` 進到 `generated`；具體追問可回答且未提前洩漏後續結果。
+10. Retrieval Shadow／Generation flags、allowlist、fallback 與 Mobile response 隱私邊界。
+11. Logs 不含聊天全文、event facts JSON、base64、push token 或 secret。
 
 ## Rollback
 

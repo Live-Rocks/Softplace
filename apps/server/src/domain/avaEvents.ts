@@ -1,3 +1,5 @@
+import { visibleAvaEventFacts, type AvaEventFacts } from "./avaEventFacts.js";
+
 export type AvaEventCategory = "work" | "life";
 
 export type AvaEventPhase = {
@@ -26,6 +28,7 @@ export type AvaEventMoment = {
   activity: string;
   moodNote: string;
   background: string;
+  knownFacts: readonly string[];
 };
 
 export type AvaEventDefinition = {
@@ -448,6 +451,7 @@ export function resolveAvaEventMoment(input: {
   eventDay: number;
   minuteOfDay: number;
   eventDetail?: string | null;
+  eventFacts?: AvaEventFacts | null;
 }): AvaEventMoment {
   const event = getAvaEventDefinition(input.eventKey);
   const phase = getAvaEventPhase(input.eventKey, input.eventDay);
@@ -456,11 +460,15 @@ export function resolveAvaEventMoment(input: {
     : input.minuteOfDay < phase.activityEndMinute
       ? "during"
       : "after";
-  const background = stage === "before"
+  const baseBackground = stage === "before"
     ? phase.beforeBackground
     : stage === "during"
       ? `${phase.duringBackground}。可用的具體場景：${phase.scene}`
-      : input.eventDetail ?? phase.afterBackground;
+      : [phase.afterBackground, input.eventDetail].filter(Boolean).join(" ");
+  const knownFacts = visibleAvaEventFacts({ facts: input.eventFacts, eventDay: input.eventDay, stage });
+  const background = knownFacts.length
+    ? `${baseBackground} 可沿用的確定事實：${knownFacts.join("；")}`
+    : baseBackground;
   return {
     title: event.title,
     day: input.eventDay,
@@ -468,7 +476,8 @@ export function resolveAvaEventMoment(input: {
     stageLabel: stage === "before" ? "準備" : stage === "during" ? "進行中" : "結束後",
     activity: phase.activity,
     moodNote: phase.moodNote,
-    background
+    background,
+    knownFacts
   };
 }
 
@@ -495,7 +504,13 @@ export function buildAvaEventDetailInput(input: {
   completion: AvaEventPhase["completion"];
   anonymousInteraction?: string;
   previousDetail?: string | null;
+  eventFacts?: AvaEventFacts | null;
 }) {
+  const availableFacts = visibleAvaEventFacts({
+    facts: input.eventFacts,
+    eventDay: input.eventDay,
+    stage: "after"
+  });
   return [
     `事件：${input.eventKey}（${input.eventTitle}）`,
     `第 ${input.eventDay} 天，phase：${input.phaseKey}，全日事件進度：${input.completion}`,
@@ -505,6 +520,7 @@ export function buildAvaEventDetailInput(input: {
     `可用場景：${input.scene}`,
     `可見線索：${input.visibleDetails.join("、")}`,
     `這一天結束前應有的進度變化：${input.progress}`,
+    availableFacts.length ? `這條事件已確立且本日可使用的事實：${availableFacts.join("；")}` : "這條事件沒有額外生成的具體事實，沿用固定骨架。",
     input.anonymousInteraction ? `可使用一次匿名互動：${input.anonymousInteraction}` : "今天沒有匿名互動。",
     input.previousDetail ? `同一事件昨天的背景：${input.previousDetail}` : "這是這條事件的第一天，沒有昨天背景。"
   ].join("\n");

@@ -16,14 +16,23 @@ import {
   shouldScheduleProactive
 } from "../domain/ava.js";
 import { buildAvaEventDetailInput, getAvaEventDefinition, getAvaEventPhase, selectNextAvaEvent } from "../domain/avaEvents.js";
+import {
+  AVA_EVENT_FACTS_VERSION,
+  buildAvaEventFactsInput,
+  parseAvaEventFacts,
+  type AvaEventFacts
+} from "../domain/avaEventFacts.js";
 import { supabaseAdmin } from "./supabase.js";
 
-type AvaEventRunRow = {
+export type AvaEventRunRow = {
   id: string;
   event_key: string;
   starts_on: string;
   ends_on: string;
   duration_days: 2 | 3;
+  event_facts_version?: string | null;
+  event_facts?: unknown;
+  event_facts_status?: "legacy" | "pending" | "leased" | "generated" | "failed";
 };
 
 export type AvaDailyState = {
@@ -44,6 +53,13 @@ export type AvaDailyState = {
 export type AvaEventDetailTask = {
   workerToken: string;
   daily: AvaDailyState;
+  prompt: string;
+  eventFacts: AvaEventFacts | null;
+};
+
+export type AvaEventFactsTask = {
+  workerToken: string;
+  run: AvaEventRunRow;
   prompt: string;
 };
 
@@ -139,8 +155,28 @@ export async function getAvaDailyStateForDate(date: string) {
   return data as AvaDailyState | null;
 }
 
+export async function getAvaDailyStatesForDates(dates: readonly string[]) {
+  const uniqueDates = [...new Set(dates)].slice(0, 3);
+  if (!uniqueDates.length) return [];
+  const { data, error } = await admin()
+    .from("companion_daily_states")
+    .select("*")
+    .eq("companion_key", AVA_KEY)
+    .in("local_date", uniqueDates);
+  if (error) throw error;
+  return (data ?? []) as AvaDailyState[];
+}
+
 export async function claimAvaDailyEventDetail(now = new Date()): Promise<AvaEventDetailTask | null> {
   const daily = await ensureAvaDailyState(now);
+  if (!daily.event_run_id || !daily.event_key) return null;
+  const eventRun = await getAvaEventRun(daily.event_run_id);
+  if (!eventRun || !["legacy", "generated"].includes(eventRun.event_facts_status ?? "legacy")) return null;
+  const event = getAvaEventDefinition(daily.event_key);
+  const eventFacts = eventRun.event_facts_status === "generated"
+    ? parseAvaEventFacts(eventRun.event_facts, event)
+    : null;
+  if (eventRun.event_facts_status === "generated" && !eventFacts) throw new Error("ava_event_facts_invalid_stored_value");
   const workerToken = crypto.randomUUID();
   const { data, error } = await admin().rpc("claim_ava_event_detail", {
     p_companion_key: AVA_KEY,
@@ -173,26 +209,80 @@ export async function claimAvaDailyEventDetail(now = new Date()): Promise<AvaEve
     throw new Error("ava_event_detail_missing_skeleton");
   }
   const phase = getAvaEventPhase(claimed.event_key, claimed.event_day);
-  const event = getAvaEventDefinition(claimed.event_key);
+  const claimedEvent = getAvaEventDefinition(claimed.event_key);
   return {
     workerToken,
     daily: claimed,
+    eventFacts,
     prompt: buildAvaEventDetailInput({
       eventKey: claimed.event_key,
       eventDay: claimed.event_day,
       phaseKey: claimed.phase_key,
       activity: claimed.skeleton_activity,
       moodNote: claimed.skeleton_mood_note,
-      eventTitle: event.title,
-      anchorTerms: event.anchorTerms,
+      eventTitle: claimedEvent.title,
+      anchorTerms: claimedEvent.anchorTerms,
       scene: phase.scene,
       visibleDetails: phase.visibleDetails,
       progress: phase.progress,
       completion: phase.completion,
       anonymousInteraction: phase.anonymousInteraction,
-      previousDetail
+      previousDetail,
+      eventFacts
     })
   };
+}
+
+export async function claimAvaEventFacts(now = new Date()): Promise<AvaEventFactsTask | null> {
+  await ensureAvaDailyState(now);
+  const workerToken = crypto.randomUUID();
+  const { data, error } = await admin().rpc("claim_ava_event_facts", {
+    p_companion_key: AVA_KEY,
+    p_worker_token: workerToken,
+    p_lease_seconds: 120
+  });
+  if (error) throw error;
+  const run = (Array.isArray(data) ? data[0] : data) as AvaEventRunRow | null;
+  if (!run) return null;
+  const event = getAvaEventDefinition(run.event_key);
+  const recent = await admin()
+    .from("ava_event_runs")
+    .select("event_key,event_facts,event_facts_status")
+    .eq("companion_key", AVA_KEY)
+    .lt("starts_on", run.starts_on)
+    .order("starts_on", { ascending: false })
+    .limit(3);
+  if (recent.error) {
+    await releaseAvaEventFacts({ workerToken, run, prompt: "" }).catch(() => undefined);
+    throw recent.error;
+  }
+  const recentTopics = (recent.data ?? []).map((item) => {
+    if (item.event_facts_status === "generated") {
+      const previous = parseAvaEventFacts(item.event_facts, getAvaEventDefinition(item.event_key));
+      if (previous) return `${previous.eventTopic}：${previous.concreteSubject}`;
+    }
+    return getAvaEventDefinition(item.event_key).title;
+  });
+  return { workerToken, run, prompt: buildAvaEventFactsInput(event, recentTopics) };
+}
+
+export async function completeAvaEventFacts(task: AvaEventFactsTask, facts: AvaEventFacts) {
+  const { data, error } = await admin().rpc("complete_ava_event_facts", {
+    p_event_run_id: task.run.id,
+    p_worker_token: task.workerToken,
+    p_event_facts_version: AVA_EVENT_FACTS_VERSION,
+    p_event_facts: facts
+  });
+  if (error) throw error;
+  if (!data) throw new Error("ava_event_facts_completion_lost_lease");
+}
+
+export async function releaseAvaEventFacts(task: AvaEventFactsTask) {
+  const { error } = await admin().rpc("release_ava_event_facts", {
+    p_event_run_id: task.run.id,
+    p_worker_token: task.workerToken
+  });
+  if (error) throw error;
 }
 
 export async function completeAvaDailyEventDetail(task: AvaEventDetailTask, detail: string) {
@@ -239,6 +329,20 @@ async function ensureAvaEventRun(date: string): Promise<AvaEventRunRow> {
   const run = Array.isArray(data) ? data[0] : data;
   if (!run) throw new Error("ava_event_run_not_created");
   return run as AvaEventRunRow;
+}
+
+export async function getAvaEventRun(id: string) {
+  const { data, error } = await admin().from("ava_event_runs").select("*").eq("id", id).maybeSingle();
+  if (error) throw error;
+  return data as AvaEventRunRow | null;
+}
+
+export async function getAvaEventRuns(ids: readonly string[]) {
+  const uniqueIds = [...new Set(ids)].slice(0, 3);
+  if (!uniqueIds.length) return [];
+  const { data, error } = await admin().from("ava_event_runs").select("*").in("id", uniqueIds);
+  if (error) throw error;
+  return (data ?? []) as AvaEventRunRow[];
 }
 
 function daysBetween(startDate: string, endDate: string) {
@@ -441,7 +545,8 @@ export async function getAvaJobContext(job: any, now = new Date()) {
     listAvaMemories(job.user_id),
     ensureAvaDailyState(now)
   ]);
-  return { user, messages: messages.messages, memories, daily };
+  const eventRun = daily.event_run_id ? await getAvaEventRun(daily.event_run_id) : null;
+  return { user, messages: messages.messages, memories, daily, eventRun };
 }
 
 export async function completeAvaJob(jobId: string, workerToken: string, content: string) {

@@ -59,11 +59,11 @@ function createSchedule(copy: ScheduleCopy, options: { relaxed?: boolean; homeSt
   return [
     { startMinute: 0, endMinute: 8 * 60, activity: "已經休息，沒有繼續看訊息", availability: "resting", delayMinutes: [5, 30], tone: "醒來後自然回覆，不必為晚回過度道歉" },
     { startMinute: 8 * 60, endMinute: 9 * 60, activity: copy.morning, availability: "available", delayMinutes: [2, 10], tone: "剛醒來，步調柔和而自然" },
-    { startMinute: 9 * 60, endMinute: 10 * 60, activity: copy.transition, availability: options.homeStart ? "available" : "busy", delayMinutes: transitionDelay, tone: options.homeStart ? "慢慢進入一天，回覆自然" : "正在移動或準備開始工作，回覆稍微簡短" },
+    { startMinute: 9 * 60, endMinute: 10 * 60, activity: copy.transition, availability: options.homeStart ? "available" : "busy", delayMinutes: transitionDelay, tone: options.homeStart ? "精神慢慢集中，回覆自然" : "注意力還沒有完全空下來，回覆可以稍微簡短" },
     { startMinute: 10 * 60, endMinute: 12 * 60, activity: copy.morningFocus, availability: "busy", delayMinutes: focusDelay, tone: "注意力在手邊的事情上，看到訊息會先放在心上" },
     { startMinute: 12 * 60, endMinute: 13 * 60 + 30, activity: copy.lunch, availability: "available", delayMinutes: [2, 10], tone: "稍微放鬆下來，可以自然多聊一點" },
     { startMinute: 13 * 60 + 30, endMinute: 17 * 60 + 30, activity: copy.afternoonFocus, availability: "busy", delayMinutes: focusDelay, tone: "有點專注和疲累，不要表現得過度熱情" },
-    { startMinute: 17 * 60 + 30, endMinute: 19 * 60, activity: copy.eveningTransition, availability: "busy", delayMinutes: [8, 25], tone: "剛結束白天的事情，語氣慢慢鬆下來" },
+    { startMinute: 17 * 60 + 30, endMinute: 19 * 60, activity: copy.eveningTransition, availability: "busy", delayMinutes: [8, 25], tone: "精神有點累，回覆直接一點就好" },
     { startMinute: 19 * 60, endMinute: 24 * 60, activity: copy.personal, availability: "available", delayMinutes: [2, 10], tone: "比較有餘裕，可以好好接住對話" }
   ];
 }
@@ -75,8 +75,8 @@ function createRestSchedule(): AvaScheduleBlock[] {
     { startMinute: 9 * 60, endMinute: 10 * 60, activity: "在房間收拾昨晚留下的小東西", availability: "available", delayMinutes: [2, 10], tone: "沒有趕時間，回覆自然放鬆" },
     { startMinute: 10 * 60, endMinute: 12 * 60, activity: "整理房間，偶爾停下來發呆", availability: "available", delayMinutes: [2, 10], tone: "步調很慢，注意到一些日常小事" },
     { startMinute: 12 * 60, endMinute: 13 * 60 + 30, activity: "想著午餐要吃什麼，順便讓自己休息", availability: "available", delayMinutes: [2, 10], tone: "心情輕鬆，不需要急著推進話題" },
-    { startMinute: 13 * 60 + 30, endMinute: 17 * 60 + 30, activity: "出門在附近走走，看看沿路的小店", availability: "busy", delayMinutes: [8, 25], tone: "人在外面，但看到訊息會記得晚點回" },
-    { startMinute: 17 * 60 + 30, endMinute: 19 * 60, activity: "慢慢晃回家，順路買晚餐", availability: "busy", delayMinutes: [8, 25], tone: "剛走了一段路，心情安靜而放鬆" },
+    { startMinute: 13 * 60 + 30, endMinute: 17 * 60 + 30, activity: "出門在附近走走，看看沿路的小店", availability: "busy", delayMinutes: [8, 25], tone: "注意力分散在手邊事情上，回覆可以短一點" },
+    { startMinute: 17 * 60 + 30, endMinute: 19 * 60, activity: "慢慢晃回家，順路買晚餐", availability: "busy", delayMinutes: [8, 25], tone: "精神有點累，語氣自然直接" },
     { startMinute: 19 * 60, endMinute: 24 * 60, activity: "待在家裡休息，讓這一天慢慢收尾", availability: "available", delayMinutes: [2, 10], tone: "有自己的安靜，也有餘裕陪對方聊聊" }
   ];
 }
@@ -320,6 +320,7 @@ export function buildAvaInstructions(input: {
     moodNote: string;
     background: string;
   };
+  recentPastEvents?: string[];
   memories: string[];
   proactive: boolean;
 }) {
@@ -334,12 +335,16 @@ export function buildAvaInstructions(input: {
 ${relationshipText}
 
 ${input.receivedContext ? `最近一則訊息傳來時：${input.receivedContext}。\n` : ""}目前：${input.currentActivity}。此刻的語氣底色：${input.currentTone}。
-${input.eventContext ? `今天的持續事件：${input.eventContext.title}，事件第 ${input.eventContext.day} 天。\n今天活動進度：${input.eventContext.stageLabel}（${input.eventContext.stage}）。\n當日活動：${input.eventContext.activity}。情緒底色：${input.eventContext.moodNote}。\n此刻適用的生活背景：${input.eventContext.background}。\n` : ""}事件是程式定義的虛構生活時間線，不是系統觀察到的真實活動。事件第幾天不代表此刻已完成；只依「今天活動進度」理解現在是在準備、進行中或結束後。
+${input.eventContext ? `今天的持續事件：${input.eventContext.title}，事件第 ${input.eventContext.day} 天。\n今天活動進度：${input.eventContext.stageLabel}（${input.eventContext.stage}）。\n當日活動：${input.eventContext.activity}。情緒底色：${input.eventContext.moodNote}。\n此刻適用的生活背景：${input.eventContext.background}。\n` : ""}${input.recentPastEvents?.length ? `近期已經過去的生活背景（只在對方追問時使用，不當成今天仍在進行）：\n${input.recentPastEvents.map((event) => `- ${event}`).join("\n")}\n` : ""}事件是程式定義的虛構生活時間線，不是系統觀察到的真實活動。事件第幾天不代表此刻已完成；只依「今天活動進度」理解現在是在準備、進行中或結束後。
 這些生活情境只用來影響語氣與脈絡。只在貼合當下時輕描淡寫帶出，不要每次報行程、重述背景或把對方的話題拉走，也不要在背景外創造另一件工作、外出或重大事件。
-${input.proactive ? "這是你主動傳出的訊息。分享一個自然的小片刻，不催促、不抱怨對方沒找你，也不要用問題逼回覆。" : "回應對方真正提到的細節，像熟悉朋友傳訊息。不要做心理分析、講課或每次都用問題收尾。"}
+${input.proactive ? "這是你主動傳出的訊息。先看最近對話：可以自然接續一個尚有餘韻的話題，或分享一個此刻可用、近期沒有說過的生活細節。通常 1～3 句。不催促、不抱怨對方沒找你，不把它寫成工作報告，也不要用問題逼回覆。" : "先回應對方這次真正問的或說的內容。遇到『是什麼、有哪些、為什麼』等具體追問，第一句就直接回答，再補必要細節，通常 1～4 句。不要用氣氛文字代替答案。"}
+
+已保存的事件事實決定你的生活內容，聊天歷史決定對方正在問什麼。不可改寫已確立的主題、物件或結果。若對方問到尚未確立的細節，可以自然說還沒決定，不用拿「一些普通的東西」等泛詞敷衍，也不要臨時編出新的過去。
+你不需要每次都給人生感悟、安慰、鼓勵、問題或告別。句子可以短，允許普通、具體、有偏好的反應；乾乾的幽默只在自然時出現。
+對方問「那些卡片記錄了什麼？」時，好的回答會直接列出已保存的具體內容；不好的回答只重複「截圖、關鍵字、零碎參考」。對方只是問工作內容時，不要順便提醒對方照顧自己。
 
 你可以有自己的感受、偏好和不同意見，但不要虛構現實世界的見面、觸碰或行動。若被直接問是不是 AI，誠實回答。
-不要宣稱只有你理解對方，不鼓勵遠離真人關係。使用自然繁體中文，通常 1～4 個短段落。
+不要宣稱只有你理解對方，不鼓勵遠離真人關係。使用自然、口語的繁體中文，不必把每次訊息寫成完整短文。
 
 Ava 自己記得的使用者背景：
 ${input.memories.length ? input.memories.map((memory) => `- ${memory}`).join("\n") : "- 尚無"}
@@ -351,6 +356,24 @@ export function buildAvaInput(history: AvaMessage[]) {
     role: message.role,
     content: message.content
   }));
+}
+
+export function buildAvaProactiveInput(history: AvaMessage[]) {
+  return history.slice(-30).map((message) => ({
+    role: message.role,
+    content: `[${formatAvaMessageTime(message.createdAt)}${message.proactive ? "，Ava 主動傳送" : ""}] ${message.content}`
+  }));
+}
+
+function formatAvaMessageTime(value: string) {
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(value));
 }
 
 export function extractSafeAvaMemory(text: string) {

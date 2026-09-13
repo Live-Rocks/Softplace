@@ -1,6 +1,6 @@
 # SoftPlace 專案狀態
 
-最後核對：`2026-09-09`（以目前 worktree 為準）
+最後核對：`2026-09-13`（以目前 worktree 為準）
 
 目前階段：本人使用／少量封測前的 staging
 
@@ -10,7 +10,7 @@
 
 | 名稱 | 目前值 | 說明 |
 | --- | --- | --- |
-| Current engineering milestone | `Ava unified event timeline` | 事件活動與分時進度已統一，待 staging 長時間實測 |
+| Current engineering milestone | `Ava queryable life facts` | 事件事實、時間遮蔽與有上下文的主動訊息已實作，待 migration／staging 實測 |
 | Expo manifest | `0.3.1` | `apps/mobile/app.json` |
 | Legacy npm package | `0.2.0` | 歷史 workspace package metadata |
 
@@ -64,6 +64,8 @@
 - **程式已驗證**：Ava 關係階段、低敏感記憶、每日生成額度與資料刪除。
 - **使用者實機確認**：Ava 全域事件保存為 2～3 天的 run 與每日 phase；每日細節已在 staging 成功生成，並低調注入回覆背景。
 - **程式已驗證、待部署實測**：具體生活改由事件 phase 單一決定，分時作息只保留 availability、延遲、睡眠與安靜時間；每個 phase 依活動時間解析準備／進行中／結束後，生成 detail 只在活動結束後進入回覆。跨日歷史背景採 read-only 查詢，缺資料時使用中性背景。
+- **程式已驗證、待 migration／部署**：新 event run 會生成一次版本化 JSON 事實，保存具體主題、3～5 個可追問事實及各 phase 的活動素材／完成結果。事實依 event day 與準備／進行／結束後遮蔽；既有 run 維持 legacy，不補寫。
+- **程式已驗證、待部署實測**：主動訊息改用同帳號最近 30 則對話，保留角色、台北時間與既有主動標記；普通具體追問要求先直接回答。已有 20 組全虛構多輪驗收案例，文字品質門檻仍需人工判讀。
 - **已實作待驗證**：同一 event run 的跨日承接、長時間主動訊息頻率與內容品質仍需持續實測。
 - **程式已驗證**：Ava assistant 回覆依句子顯示為最多 3 個泡泡，資料庫仍保存完整原文。
 - **使用者實機確認**：首個 Preview APK（EAS build `81f8db28-51aa-4a0d-acfa-8f81bfc629f6`）已在 Android 安裝；設定頁顯示「Ava 推播：已註冊」，並成功收到第一則包含 Ava 完整內文的遠端推播。Mobile 通知權限、Expo Push Token 註冊、Server sender、EAS FCM V1 與 Firebase Android app 的端到端鏈路已驗收。
@@ -72,7 +74,7 @@
 
 - **未完成**：Expo Go 仍依賴 Metro；使用 LAN 模式時手機與 Mac 需在相同網路。Zeabur 只讓 API 離開本機，沒有把 Expo bundle 變成獨立 App。
 - **已實作待驗證**：部分 Android 裝置的鍵盤／輸入列仍可能有少量偏移，目前採 Expo Go 相容的避讓方式。
-- **已知架構限制**：Ava 主動訊息目前不帶最近真實對話，只使用主動訊息指令與當日生活背景，容易顯得脫離脈絡。
+- **staging 現況**：部署前的 Ava 主動訊息仍可能脫離近期對話；新版已接入帳號隔離的最近 30 則歷史，尚待 migration `018` 後一併部署驗收。
 - **已知競態**：若使用者在 reply job 已被 lease、Worker 已取得 context 後再補傳訊息，message id 可能被加進 job payload，但該次生成未必讀到新訊息。
 - **實驗中**：Ava 的延遲、主動性、句子泡泡與「像真人」程度仍需長期觀察；不能只以單次回覆判定。
 - **實驗中**：安放 prompt 與模型語氣仍會隨上下文產生變化，輕量／深度規則不是程式硬性句數限制。
@@ -82,7 +84,7 @@
 
 1. 保持單一 allowlist 並先關閉 Generation；在 staging 套用 migration `017` 後部署 Phase 2.5 server，再以一筆 injected 與一筆 abstained 驗證 `phase25_v1`、manifest 重建與新版 review/report。
 2. 分次累積同一新版設定至少 10 筆 verified required、10 筆 not_needed，且至少 10 筆完整 reviewed injected；確認資料完整、helpful、漏召回、不必要注入與 timeout，最後才人工 go/no-go。
-3. 部署並觀察至少一個完整 2～3 天 Ava 事件，確認活動前後順序、跨日承接與完成後不反覆說仍在進行；主動訊息機械感另案處理。
+3. 套用 migration `018` 後部署 Ava event facts，觀察至少兩條完整新事件；追問直接回答率目標至少 90%，不得有事實矛盾或提前完成，至少 80% 回覆不附無關感悟、安慰或告別。
 4. 修正 leased reply job 補傳訊息競態，定義 Worker context snapshot 邊界。
 5. 在少量封測前補齊監控、錯誤可讀性、資料刪除與隱私說明。
 

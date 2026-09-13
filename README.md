@@ -19,7 +19,7 @@ SoftPlace 是一個私人的 AI 情緒陪伴 App。核心角色「安放」提�
 apps/mobile/               Expo App
 apps/server/               Express API、OpenAI 與 Worker
 packages/shared/           Mobile／Server 共用型別
-supabase/migrations/       001～017 資料庫 migration
+supabase/migrations/       001～018 資料庫 migration
 docs/                      產品、架構、狀態、維運與決策文件
 zbpack.json                Zeabur build／start 設定
 ```
@@ -36,7 +36,7 @@ cp apps/server/.env.example apps/server/.env
 cp apps/mobile/.env.example apps/mobile/.env
 ```
 
-在 Supabase SQL Editor 依序執行 `supabase/migrations/001_*.sql` 到 `017_*.sql`。已執行的 migration 不回頭改寫；後續修正一律追加新編號。把實際 credential 填入兩份 `.env`；OpenAI key 與 Supabase service-role key 只能放在 server，不能放進 mobile。
+在 Supabase SQL Editor 依序執行 `supabase/migrations/001_*.sql` 到 `018_*.sql`。已執行的 migration 不回頭改寫；後續修正一律追加新編號。把實際 credential 填入兩份 `.env`；OpenAI key 與 Supabase service-role key 只能放在 server，不能放進 mobile。
 
 ## 啟動
 
@@ -66,6 +66,7 @@ npm run test --workspace apps/mobile
 npm test
 npm run build:server
 npm run test:retrieval:sql
+npm run test:ava-facts:sql
 ```
 
 Retrieval／RAG 的虛構繁中離線評估需另外手動執行；這套離線工具不會進入一般測試或正式聊天。Runtime 的 Deep allowlist Canary 是另一條獨立流程：

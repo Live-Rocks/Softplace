@@ -114,17 +114,22 @@ sequenceDiagram
     S-->>M: 202 Accepted
     C->>W: 每分鐘 POST /internal/companion/tick
     W->>DB: 排程主動訊息、原子 claim 1 個到期 job
-    W->>DB: 讀取關係、記憶、訊息與每日狀態
+    W->>DB: 讀取關係、記憶、最近 30 則訊息與每日狀態
     W->>O: 生活情境＋對話 input
     O-->>W: Ava 回覆
     W->>DB: complete_companion_job
     W->>P: 傳送 Ava 遠端推播
+    W->>DB: claim 新 event run 的事實設定
+    W->>O: Structured Output 生成可追問事件事實
+    W->>DB: 保存唯一版本；完成後才生成 daily detail
     P-->>M: 背景／關閉 App 通知
     M->>S: 每 12 秒輪詢 Ava messages
     S-->>M: 新訊息與 state
 ```
 
-Ava 生活以 `Asia/Taipei` 計算。分時作息只負責 availability、回覆延遲、睡眠與安靜時間；具體生活內容由全域 2～3 天 `ava_event_runs` 與每日 phase 決定，同一天對所有使用者相同。每個 phase 在程式中定義活動開始／結束時間與準備、進行中、結束後三段背景，避免事件日的最終 phase 在早上就被誤認為完成。Worker 每天為該 phase 生成一份全域事件素材，活動開始前不注入、進行中只使用固定場景、結束後才可使用完整生成細節；失敗時回退固定背景。收到訊息時與目前時間分別解析，跨日歷史只讀取既有 daily state，缺資料時使用中性時段背景，不建立歷史事件。這些背景不讀取或保存任何使用者私訊。Ava 每次 tick 最多 claim 1 個到期 job，lease 與 RPC 避免重複完成；同一 endpoint 也會獨立處理 Retrieval Shadow jobs，即使 Ava feature 關閉仍可運作。
+Ava 生活以 `Asia/Taipei` 計算。分時作息只負責 availability、回覆延遲、睡眠與安靜時間；具體生活內容由全域 2～3 天 `ava_event_runs` 與每日 phase 決定，同一天對所有使用者相同。新 event run 先以一次 Structured Output 生成版本化 JSON 事實，內容包含具體主題、3～5 個可追問事實及各 phase 的活動素材與完成結果；生成只取得全域事件骨架和最近三條事件主題，不取得任何帳號資料或私訊。資料庫的 claim／complete／release lease 保證只有持有當前 token 的 Worker 能保存正式版本；既有 run 維持 `legacy`，不補生成。
+
+每個 phase 在程式中定義活動開始／結束時間與準備、進行中、結束後三段背景。共用解析器只開放已到 event day 與 stage 的事實，活動結果不會提前進入 prompt；固定的結束背景永遠保留，daily detail 只作補充。設定尚未完成時，聊天直接回退既有 phase 骨架且暫緩 daily detail，不等待額外生成。收到訊息時與目前時間分別解析；最多讀取最近三個相關歷史日期的既有 daily state/run，缺資料時使用中性背景，不建立歷史事件。一般回覆與主動訊息都使用帳號隔離的最近 30 則對話；主動訊息另外附台北時間與既有主動標記，避免脫離上下文或重複分享。Ava 每次 tick 先處理正常 job，之後最多處理一次全域生成；同一 endpoint 也會獨立處理 Retrieval Shadow jobs，即使 Ava feature 關閉仍可運作。
 
 Mobile 已安裝通知套件，登入後會取得並向 Server 註冊 Expo Push Token；Server Worker 完成 Ava 回覆後會送出遠端推播，點擊通知可導向 Ava。Android Preview APK 已完成 token 註冊及背景／關閉 App 收訊的實機驗收；iOS 尚未納入這次驗收。Ava 頁面每 12 秒、App 其他分頁每 30 秒的輪詢仍保留，用於前景畫面與狀態同步，也作為推播未送達時的 fallback。
 
@@ -174,7 +179,7 @@ Phase 2.5 的新 run 以 `evaluation_version=phase25_v1` 保存實際模型／�
 | 安放 light | `gpt-4o-mini` | 最近 10 則＋確認記憶＋light prompt |
 | 安放 deep | `gpt-5.4-mini` | 最近 10 則＋確認記憶；allowlist 可從 Top 20 加最多 5 個本機篩選的 user-only retrieval candidates＋deep prompt |
 | 安放圖片 | deep model | 同上，加單張壓縮圖片 |
-| Ava | `gpt-5.4-mini` | Worker 取得的近期訊息、關係、低敏感記憶與生活情境 |
+| Ava | `gpt-5.4-mini` | 帳號隔離的最近 30 則、關係、低敏感記憶、時間遮蔽後的事件事實與生活情境 |
 
 模型名稱均由 server env 控制。`AI_PROVIDER=local` 只供明確的本機開發回覆，不會在 OpenAI 設定缺失時靜默回退。
 

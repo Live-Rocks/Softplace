@@ -14,6 +14,7 @@
     "start:server": "npm --workspace apps/server run start",
     "test": "npm --workspace apps/server run test",
     "test:retrieval:sql": "bash supabase/tests/run_017_local.sh",
+    "test:ava-facts:sql": "bash supabase/tests/run_018_local.sh",
     "eval:retrieval": "npm --workspace apps/server run eval:retrieval --",
     "retrieval:shadow:backfill": "npm --workspace apps/server run retrieval:shadow:backfill --",
     "retrieval:evidence:backfill": "npm --workspace apps/server run retrieval:evidence:backfill --",
