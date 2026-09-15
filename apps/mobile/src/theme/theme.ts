@@ -7,8 +7,12 @@ export const colors = {
   line: "#E5DCD2",
   accent: "#4C7766",
   accentDark: "#315D50",
+  accentSoft: "#E8F0EC",
   rose: "#B76E79",
+  roseSoft: "#F5E8E8",
   blue: "#546A8B",
+  blueSoft: "#E9EDF3",
+  control: "#EEE9E3",
   warning: "#A35C2C"
 };
 
@@ -20,3 +24,37 @@ export const spacing = {
   xl: 32
 };
 
+export const typography = {
+  brand: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800" as const
+  },
+  pageTitle: {
+    fontSize: 30,
+    lineHeight: 38,
+    fontWeight: "800" as const
+  },
+  sectionTitle: {
+    fontSize: 24,
+    lineHeight: 30,
+    fontWeight: "800" as const
+  },
+  body: {
+    fontSize: 16,
+    lineHeight: 24
+  },
+  message: {
+    fontSize: 16,
+    lineHeight: 24
+  },
+  label: {
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: "700" as const
+  },
+  caption: {
+    fontSize: 12,
+    lineHeight: 17
+  }
+};

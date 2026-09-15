@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
-import { Brain, Camera, Send, X } from "lucide-react-native";
+import { X } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -11,17 +11,17 @@ import {
   Platform,
   Pressable,
   StyleSheet,
-  Switch,
   Text,
-  TextInput,
   View
 } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
-import type { AiProvider, ChatRequest } from "@softplace/shared";
+import type { ChatRequest } from "@softplace/shared";
 import { api } from "../api/client";
-import { SoftButton } from "../components/SoftButton";
+import { ChatComposer } from "../components/ChatComposer";
+import { CompanionBubble } from "../components/CompanionBubble";
+import { CompanionModeControl } from "../components/CompanionModeControl";
 import { useInitialScrollToLatest } from "../hooks/useInitialScrollToLatest";
-import { colors } from "../theme/theme";
+import { colors, typography } from "../theme/theme";
 import type { LocalMessage, PendingMemory } from "../types";
 
 const DEEP_MODE_KEY = "softplace.deepMode";
@@ -47,7 +47,6 @@ export function ChatScreen({
   const [image, setImage] = useState<{ uri: string; base64: string } | null>(null);
   const [pendingMemories, setPendingMemories] = useState<PendingMemory[]>([]);
   const [notice, setNotice] = useState("");
-  const [provider, setProvider] = useState<AiProvider | null>(null);
   const [deepMode, setDeepMode] = useState(false);
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
@@ -171,7 +170,6 @@ export function ChatScreen({
       };
       const response = await api.chat(request, accessToken);
       setMessages((current) => [...current, response.assistantMessage]);
-      setProvider(response.provider);
       setNotice(response.quotaNotice ?? "");
       if (deepMode && response.mode === "light") {
         await setDeepModePersisted(false);
@@ -214,19 +212,11 @@ export function ChatScreen({
           <Text style={styles.title}>我在這裡</Text>
           <Text style={styles.subtitle}>先把這一刻放下來一點點。</Text>
         </View>
-        <View style={[styles.modeControl, deepMode && styles.modeControlActive]}>
-          <Brain size={18} color={deepMode ? colors.accentDark : colors.softText} />
-          <Text style={[styles.modeLabel, deepMode && styles.modeLabelActive]}>
-            {deepMode ? "深度" : "輕量"}
-          </Text>
-          <Switch
-            value={deepMode}
-            onValueChange={setDeepModePersisted}
-            disabled={sending}
-            trackColor={{ false: colors.line, true: "#A8C5B8" }}
-            thumbColor={deepMode ? colors.accent : "#FFFFFF"}
-          />
-        </View>
+        <CompanionModeControl
+          value={deepMode ? "deep" : "light"}
+          disabled={sending}
+          onChange={(mode) => void setDeepModePersisted(mode === "deep")}
+        />
       </View>
 
       <FlatList
@@ -261,15 +251,21 @@ export function ChatScreen({
             <Text style={styles.emptyState}>這裡還是空的。你可以慢慢開始。</Text>
           )
         }
-        renderItem={({ item, index }) => (
-          <View
-            style={[styles.bubble, item.role === "user" ? styles.userBubble : styles.assistantBubble]}
-            onLayout={index === messages.length - 1 ? onLastItemLayout : undefined}
-          >
-            {item.imagePresent ? <Text style={styles.imageFlag}>已附上一張圖片</Text> : null}
-            <Text style={[styles.messageText, item.role === "user" && styles.userText]}>{item.content}</Text>
-          </View>
-        )}
+        renderItem={({ item, index }) => {
+          const displayRole = item.role === "user" ? "user" : "assistant";
+          const previousRole = index > 0
+            ? messages[index - 1]?.role === "user" ? "user" : "assistant"
+            : null;
+          return (
+            <CompanionBubble
+              role={displayRole}
+              content={item.content}
+              imagePresent={item.imagePresent}
+              style={index === 0 ? undefined : previousRole === displayRole ? styles.groupedBubble : styles.turnBubble}
+              onLayout={index === messages.length - 1 ? onLastItemLayout : undefined}
+            />
+          );
+        }}
       />
 
       {pendingMemories.length ? (
@@ -290,9 +286,6 @@ export function ChatScreen({
       ) : null}
 
       {notice ? <Text style={styles.notice}>{notice}</Text> : null}
-      {provider ? (
-        <Text style={styles.provider}>目前回覆來源：{provider === "openai" ? "OpenAI API" : "本機測試"}</Text>
-      ) : null}
       {image ? (
         <View style={styles.previewRow}>
           <Image source={{ uri: image.uri }} style={styles.preview} />
@@ -303,18 +296,14 @@ export function ChatScreen({
         </View>
       ) : null}
 
-      <View style={styles.composer}>
-        <Pressable onPress={pickImage} style={styles.iconButton}>
-          <Camera size={22} color={colors.accentDark} />
-        </Pressable>
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          style={styles.input}
-          multiline
-        />
-        <SoftButton label="送出" icon={Send} onPress={send} loading={sending} disabled={!text.trim() && !image} />
-      </View>
+      <ChatComposer
+        value={text}
+        onChangeText={setText}
+        onImagePress={pickImage}
+        onSend={send}
+        sending={sending}
+        disabled={!text.trim() && !image}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -326,7 +315,6 @@ const styles = StyleSheet.create({
   },
   messages: {
     padding: 16,
-    gap: 12,
     flexGrow: 1
   },
   fixedHeader: {
@@ -346,38 +334,12 @@ const styles = StyleSheet.create({
     gap: 2
   },
   title: {
+    ...typography.sectionTitle,
     color: colors.ink,
-    fontSize: 24,
-    fontWeight: "800"
   },
   subtitle: {
+    ...typography.caption,
     color: colors.muted,
-    fontSize: 12,
-    lineHeight: 17
-  },
-  modeControl: {
-    minHeight: 46,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingLeft: 10,
-    paddingRight: 4,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 8,
-    backgroundColor: colors.surface
-  },
-  modeControlActive: {
-    borderColor: colors.accent,
-    backgroundColor: "#F0F6F2"
-  },
-  modeLabel: {
-    color: colors.ink,
-    fontSize: 13,
-    fontWeight: "700"
-  },
-  modeLabelActive: {
-    color: colors.accentDark
   },
   olderButton: {
     minHeight: 40,
@@ -393,34 +355,11 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingVertical: 40
   },
-  bubble: {
-    maxWidth: "88%",
-    borderRadius: 8,
-    padding: 14,
-    borderWidth: 1
+  groupedBubble: {
+    marginTop: 6
   },
-  userBubble: {
-    alignSelf: "flex-end",
-    backgroundColor: colors.accent,
-    borderColor: colors.accent
-  },
-  assistantBubble: {
-    alignSelf: "flex-start",
-    backgroundColor: colors.surface,
-    borderColor: colors.line
-  },
-  messageText: {
-    color: colors.ink,
-    lineHeight: 22,
-    fontSize: 15
-  },
-  userText: {
-    color: "#fff"
-  },
-  imageFlag: {
-    color: "#fff",
-    fontWeight: "700",
-    marginBottom: 6
+  turnBubble: {
+    marginTop: 14
   },
   memoryTray: {
     gap: 8,
@@ -459,12 +398,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8
   },
-  provider: {
-    color: colors.softText,
-    fontSize: 11,
-    paddingHorizontal: 14,
-    paddingBottom: 6
-  },
   previewRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -481,35 +414,5 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.muted,
     fontSize: 12
-  },
-  composer: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-    padding: 12,
-    borderTopWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.surface
-  },
-  iconButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.line,
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  input: {
-    flex: 1,
-    minHeight: 48,
-    maxHeight: 118,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    color: colors.ink,
-    backgroundColor: colors.bg
   }
 });

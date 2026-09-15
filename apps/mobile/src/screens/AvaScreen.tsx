@@ -1,4 +1,3 @@
-import { Send } from "lucide-react-native";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -7,15 +6,15 @@ import {
   Platform,
   StyleSheet,
   Text,
-  TextInput,
   View
 } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import type { AvaMessage, AvaState } from "@softplace/shared";
 import { api } from "../api/client";
-import { SoftButton } from "../components/SoftButton";
+import { ChatComposer } from "../components/ChatComposer";
+import { CompanionBubble } from "../components/CompanionBubble";
 import { useInitialScrollToLatest } from "../hooks/useInitialScrollToLatest";
-import { colors } from "../theme/theme";
+import { colors, typography } from "../theme/theme";
 import { splitAvaBubbleSegments } from "../utils/avaBubbleSegments";
 
 type Props = {
@@ -147,23 +146,36 @@ export function AvaScreen({ accessToken, active, onUnreadCountChange }: Props) {
         }
         renderItem={({ item, index }) => {
           const isLast = index === messages.length - 1;
+          const previousRole = index > 0 ? messages[index - 1]?.role : null;
+          const spacingStyle = index === 0
+            ? undefined
+            : previousRole === item.role
+              ? styles.groupedMessage
+              : styles.turnMessage;
 
           if (item.role === "user") {
             return (
-              <View style={[styles.bubble, styles.userBubble]} onLayout={isLast ? onLastItemLayout : undefined}>
-                <Text style={[styles.messageText, styles.userText]}>{item.content}</Text>
-              </View>
+              <CompanionBubble
+                role="user"
+                content={item.content}
+                style={spacingStyle}
+                onLayout={isLast ? onLastItemLayout : undefined}
+              />
             );
           }
 
           const segments = splitAvaBubbleSegments(item.content);
           return (
-            <View style={styles.avaBubbleGroup} onLayout={isLast ? onLastItemLayout : undefined}>
-              {segments.map((segment, index) => (
-                <View key={`${item.id}-${index}`} style={[styles.bubble, styles.avaBubble]}>
-                  {item.proactive && index === 0 ? <Text style={styles.proactive}>Ava 主動傳來</Text> : null}
-                  <Text style={styles.messageText}>{segment}</Text>
-                </View>
+            <View style={[styles.avaBubbleGroup, spacingStyle]} onLayout={isLast ? onLastItemLayout : undefined}>
+              {segments.map((segment, segmentIndex) => (
+                <CompanionBubble
+                  key={`${item.id}-${segmentIndex}`}
+                  role="assistant"
+                  tone="ava"
+                  content={segment}
+                  proactive={item.proactive && segmentIndex === 0}
+                  style={styles.avaSegment}
+                />
               ))}
             </View>
           );
@@ -171,10 +183,14 @@ export function AvaScreen({ accessToken, active, onUnreadCountChange }: Props) {
       />
 
       {notice ? <Text style={styles.notice}>{notice}</Text> : null}
-      <View style={styles.composer}>
-        <TextInput value={text} onChangeText={setText} style={styles.input} multiline maxLength={4000} />
-        <SoftButton label="送出" icon={Send} onPress={send} loading={sending} disabled={!text.trim()} />
-      </View>
+      <ChatComposer
+        value={text}
+        onChangeText={setText}
+        onSend={send}
+        sending={sending}
+        disabled={!text.trim()}
+        maxLength={4000}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -185,21 +201,16 @@ const styles = StyleSheet.create({
   avatar: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "#D8B7B0" },
   avatarText: { color: "#fff", fontSize: 20, fontWeight: "800" },
   headerCopy: { flex: 1, gap: 2 },
-  title: { color: colors.ink, fontSize: 22, fontWeight: "800" },
-  status: { color: colors.muted, fontSize: 12 },
-  usage: { color: colors.softText, fontSize: 12 },
-  messages: { flexGrow: 1, padding: 16, gap: 12 },
+  title: { ...typography.sectionTitle, color: colors.ink },
+  status: { ...typography.caption, color: colors.muted },
+  usage: { ...typography.caption, color: colors.softText },
+  messages: { flexGrow: 1, padding: 16 },
   empty: { alignItems: "center", justifyContent: "center", padding: 40, gap: 8 },
   emptyTitle: { color: colors.ink, fontSize: 17, fontWeight: "800" },
   emptyText: { color: colors.muted, lineHeight: 21, textAlign: "center" },
-  bubble: { borderRadius: 8, padding: 13, borderWidth: 1 },
-  userBubble: { alignSelf: "flex-end", maxWidth: "86%", backgroundColor: colors.accent, borderColor: colors.accent },
-  avaBubbleGroup: { alignSelf: "flex-start", maxWidth: "86%", gap: 5 },
-  avaBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderColor: colors.line },
-  messageText: { color: colors.ink, fontSize: 15, lineHeight: 22 },
-  userText: { color: "#fff" },
-  proactive: { color: colors.rose, fontSize: 11, fontWeight: "700", marginBottom: 5 },
-  notice: { color: colors.warning, paddingHorizontal: 16, paddingVertical: 7 },
-  composer: { flexDirection: "row", alignItems: "flex-end", gap: 8, padding: 12, borderTopWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
-  input: { flex: 1, minHeight: 48, maxHeight: 118, borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, color: colors.ink, backgroundColor: colors.bg }
+  groupedMessage: { marginTop: 6 },
+  turnMessage: { marginTop: 14 },
+  avaBubbleGroup: { alignSelf: "flex-start", maxWidth: "88%", gap: 5 },
+  avaSegment: { maxWidth: "100%" },
+  notice: { color: colors.warning, paddingHorizontal: 16, paddingVertical: 7 }
 });
